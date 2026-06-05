@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      1.0.5
+// @version      1.0.6
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
@@ -372,6 +372,21 @@
             }
           }
           parent = parent.$parent;
+        }
+      }
+
+      // 提取字段标签 (专门针对 ElTable 复杂表格的表头跨层级提取)
+      if (!labelText) {
+        const td = input.closest('td');
+        if (td && typeof td.className === 'string' && td.className.includes('el-table_')) {
+          const match = td.className.match(/el-table_[a-zA-Z0-9_]+/);
+          if (match) {
+            const tableWrap = input.closest('.el-table');
+            const th = tableWrap ? tableWrap.querySelector(`th.${match[0]}`) : document.querySelector(`th.${match[0]}`);
+            if (th) {
+              labelText = (th.innerText || th.textContent || '').trim();
+            }
+          }
         }
       }
 

@@ -379,6 +379,21 @@
         }
       }
 
+      // 提取字段标签 (专门针对 ElTable 复杂表格的表头跨层级提取)
+      if (!labelText) {
+        const td = input.closest('td');
+        if (td && typeof td.className === 'string' && td.className.includes('el-table_')) {
+          const match = td.className.match(/el-table_[a-zA-Z0-9_]+/);
+          if (match) {
+            const tableWrap = input.closest('.el-table');
+            const th = tableWrap ? tableWrap.querySelector(`th.${match[0]}`) : document.querySelector(`th.${match[0]}`);
+            if (th) {
+              labelText = (th.innerText || th.textContent || '').trim();
+            }
+          }
+        }
+      }
+
       // 提取字段标签 (终极兜底：向上5层寻找相邻兄弟元素的文字，通杀所有自定义栅格、表格、Descriptions布局)
       if (!labelText) {
         let el = input;
