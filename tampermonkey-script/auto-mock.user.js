@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      1.0.4
+// @version      1.0.5
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
@@ -375,27 +375,43 @@
         }
       }
 
-      // 提取字段标签 (兜底：基于传统 HTML 表格 td / 栅格兄弟节点的相邻文字提取)
+      // 提取字段标签 (终极兜底：向上5层寻找相邻兄弟元素的文字，通杀所有自定义栅格、表格、Descriptions布局)
       if (!labelText) {
-        const td = input.closest('td');
-        if (td && td.previousElementSibling) {
-          labelText = td.previousElementSibling.innerText || td.previousElementSibling.textContent || '';
-        }
-        if (!labelText) {
-          const wrapper = input.closest('.el-select, .el-date-editor, .el-cascader, .el-input');
-          if (wrapper && wrapper.previousElementSibling) {
-            labelText = wrapper.previousElementSibling.innerText || wrapper.previousElementSibling.textContent || '';
-          } else if (wrapper && wrapper.parentElement && wrapper.parentElement.previousElementSibling) {
-            labelText = wrapper.parentElement.previousElementSibling.innerText || wrapper.parentElement.previousElementSibling.textContent || '';
+        let el = input;
+        for (let i = 0; i < 5; i++) {
+          if (!el || el.tagName === 'BODY') break;
+          let sibling = el.previousElementSibling;
+          let siblingCount = 0; // 性能优化：横向最多只找前面3个兄弟节点，防止长列表节点爆炸卡顿
+          while (sibling && siblingCount < 3) {
+            let text = (sibling.innerText || sibling.textContent || '').trim();
+            // 排除过长的非标题文本
+            if (text && text.length > 0 && text.length < 50) {
+              labelText = text;
+              break;
+            }
+            sibling = sibling.previousElementSibling;
+            siblingCount++;
           }
+          if (labelText) break;
+          el = el.parentElement;
         }
       }
 
       if (!labelText) labelText = input.placeholder || '';
       if (!labelText && input.name) labelText = input.name;
 
-      // 检查是否命中黑名单
-      const isIgnored = CONFIG.IGNORE_KEYWORDS.some(keyword => labelText.toLowerCase().includes(keyword.toLowerCase()));
+      // 提取 Vue 绑定的底层变量名 (v-model)，例如 "form.acceptanceDetails"
+      let vModelExpr = '';
+      if (vueInstance && vueInstance.$vnode && vueInstance.$vnode.data && vueInstance.$vnode.data.model) {
+        vModelExpr = vueInstance.$vnode.data.model.expression || '';
+      }
+      
+      // 检查是否命中黑名单 (同时检查 UI标签名 和 底层变量名)
+      const isIgnored = CONFIG.IGNORE_KEYWORDS.some(keyword => {
+        const kw = keyword.toLowerCase();
+        return labelText.toLowerCase().includes(kw) || 
+               (vModelExpr && vModelExpr.toLowerCase().includes(kw));
+      });
       if (isIgnored) {
         console.log(`Auto Mock: 跳过字段 "${labelText}" (触发黑名单)`);
         skipCount++;

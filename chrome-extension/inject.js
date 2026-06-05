@@ -385,7 +385,8 @@
         for (let i = 0; i < 5; i++) {
           if (!el || el.tagName === 'BODY') break;
           let sibling = el.previousElementSibling;
-          while (sibling) {
+          let siblingCount = 0; // 性能优化：横向最多只找前面3个兄弟节点，防止长列表导致 O(N^2) 卡顿
+          while (sibling && siblingCount < 3) {
             let text = (sibling.innerText || sibling.textContent || '').trim();
             // 排除过长的非标题文本
             if (text && text.length > 0 && text.length < 50) {
@@ -393,6 +394,7 @@
               break;
             }
             sibling = sibling.previousElementSibling;
+            siblingCount++;
           }
           if (labelText) break;
           el = el.parentElement;
