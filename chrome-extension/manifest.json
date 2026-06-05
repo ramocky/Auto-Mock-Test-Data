@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Auto Mock Test Data",
+  "version": "1.0",
+  "description": "自动填充表单测试数据，支持 Element UI",
+  "icons": {
+    "128": "logo.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "点击填充"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inject.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html"
+}
