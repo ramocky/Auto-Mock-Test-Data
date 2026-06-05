@@ -356,6 +356,25 @@
         const labelEl = formItem.querySelector('.el-form-item__label');
         if (labelEl) labelText = labelEl.innerText;
       }
+      
+      // 提取字段标签 (Vue 内存回溯，精准度最高，专治隐藏标题和复杂下拉框)
+      if (!labelText && vueInstance) {
+        let parent = vueInstance.$parent;
+        while (parent) {
+          if (parent.$options) {
+            if (parent.$options.name === 'ElFormItem' && parent.label) {
+              labelText = parent.label;
+              break;
+            }
+            if (parent.$options.name === 'ElTableColumn' && parent.label) {
+              labelText = parent.label;
+              break;
+            }
+          }
+          parent = parent.$parent;
+        }
+      }
+
       if (!labelText) labelText = input.placeholder || '';
       if (!labelText && input.name) labelText = input.name;
 
