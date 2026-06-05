@@ -6,7 +6,9 @@
 // @author       You
 // @match        *://*/*
 // @include      *
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @license      MIT
 // @icon         https://ui-avatars.com/api/?name=M&background=24292e&color=fff&size=128&font-size=0.6&length=1
 // ==/UserScript==
@@ -17,19 +19,13 @@
   // ==========================================
   // [用户配置区] 快捷键与忽略规则配置
   // ==========================================
-  const CONFIG = {
-    // 唤出悬浮窗控制台的快捷键（需要同时按下 Alt 键）
-    // 默认: 'x' 代表 Alt + X
+  const DEFAULT_CONFIG = {
     SHORTCUT_SPOTLIGHT: 'x',
-    
-    // 触发页面一键全量填充的快捷键（需要同时按下 Alt 键）
-    // 默认: 'z' 代表 Alt + Z
     SHORTCUT_FILL_ALL: 'z',
-
-    // 一键填充时要忽略的字段名黑名单
-    // 只要表单输入框的文字描述包含以下任意词汇，则该框会被智能跳过
     IGNORE_KEYWORDS: ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated']
   };
+
+  let CONFIG = (typeof GM_getValue !== 'undefined') ? GM_getValue('auto_mock_config', DEFAULT_CONFIG) : DEFAULT_CONFIG;
 
   console.log("Auto Mock UserScript loaded.");
 
@@ -406,5 +402,68 @@
       fillElementUiForms();
     }
   });
+
+  // ==========================================
+  // 7. 偏好设置可视化面板 (Settings UI)
+  // ==========================================
+  function openSettingsUI() {
+    if (document.getElementById('mock-ext-settings')) return;
+    const container = document.createElement('div');
+    container.id = 'mock-ext-settings';
+    container.style.cssText = `
+      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+      background: rgba(0, 0, 0, 0.5); z-index: 9999999;
+      display: flex; justify-content: center; align-items: center;
+    `;
+    const panel = document.createElement('div');
+    panel.style.cssText = `
+      width: 480px; background: #fff; border-radius: 12px; padding: 24px; box-sizing: border-box;
+      font-family: -apple-system, sans-serif; color: #333; box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+    `;
+    panel.innerHTML = `
+      <h2 style="margin: 0 0 20px 0; font-size: 18px; color: #2c3e50; font-weight: bold;">⚙️ 高级偏好设置</h2>
+      
+      <div style="margin-bottom: 15px;">
+        <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">独立控制台唤醒快捷键 (Alt + ?)</label>
+        <input id="setting-spotlight" value="${CONFIG.SHORTCUT_SPOTLIGHT}" maxlength="1" style="width: 100%; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
+      </div>
+      
+      <div style="margin-bottom: 15px;">
+        <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">一键全量填充快捷键 (Alt + ?)</label>
+        <input id="setting-fillall" value="${CONFIG.SHORTCUT_FILL_ALL}" maxlength="1" style="width: 100%; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
+      </div>
+
+      <div style="margin-bottom: 24px;">
+        <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">一键填充拦截黑名单 (关键词用逗号分隔)</label>
+        <textarea id="setting-ignore" style="width: 100%; height: 80px; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; resize: none; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s; font-family: monospace;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'">${CONFIG.IGNORE_KEYWORDS.join(', ')}</textarea>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 12px;">
+        <button id="setting-cancel" style="padding: 10px 20px; background: #f4f4f5; color: #909399; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all .2s;" onmouseover="this.style.background='#e9e9eb'" onmouseout="this.style.background='#f4f4f5'">取消</button>
+        <button id="setting-save" style="padding: 10px 20px; background: #409eff; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all .2s;" onmouseover="this.style.background='#66b1ff'" onmouseout="this.style.background='#409eff'">保存并应用</button>
+      </div>
+    `;
+    container.appendChild(panel);
+    document.body.appendChild(container);
+
+    document.getElementById('setting-cancel').onclick = () => container.remove();
+    document.getElementById('setting-save').onclick = () => {
+      CONFIG.SHORTCUT_SPOTLIGHT = document.getElementById('setting-spotlight').value.toLowerCase() || 'x';
+      CONFIG.SHORTCUT_FILL_ALL = document.getElementById('setting-fillall').value.toLowerCase() || 'z';
+      const ignores = document.getElementById('setting-ignore').value.split(',').map(s => s.trim()).filter(Boolean);
+      CONFIG.IGNORE_KEYWORDS = ignores.length ? ignores : DEFAULT_CONFIG.IGNORE_KEYWORDS;
+      
+      if (typeof GM_setValue !== 'undefined') {
+        GM_setValue('auto_mock_config', CONFIG);
+      }
+      container.remove();
+      // Optional toast UI or simple alert
+      alert('✅ 高级偏好设置已保存！配置立即生效。');
+    };
+  }
+
+  if (typeof GM_registerMenuCommand !== 'undefined') {
+    GM_registerMenuCommand('⚙️ 高级偏好设置', openSettingsUI);
+  }
 
 })();
