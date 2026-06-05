@@ -379,6 +379,22 @@
         }
       }
 
+      // 提取字段标签 (兜底：基于传统 HTML 表格 td / 栅格兄弟节点的相邻文字提取)
+      if (!labelText) {
+        const td = input.closest('td');
+        if (td && td.previousElementSibling) {
+          labelText = td.previousElementSibling.innerText || td.previousElementSibling.textContent || '';
+        }
+        if (!labelText) {
+          const wrapper = input.closest('.el-select, .el-date-editor, .el-cascader, .el-input');
+          if (wrapper && wrapper.previousElementSibling) {
+            labelText = wrapper.previousElementSibling.innerText || wrapper.previousElementSibling.textContent || '';
+          } else if (wrapper && wrapper.parentElement && wrapper.parentElement.previousElementSibling) {
+            labelText = wrapper.parentElement.previousElementSibling.innerText || wrapper.parentElement.previousElementSibling.textContent || '';
+          }
+        }
+      }
+
       if (!labelText) labelText = input.placeholder || '';
       if (!labelText && input.name) labelText = input.name;
       
