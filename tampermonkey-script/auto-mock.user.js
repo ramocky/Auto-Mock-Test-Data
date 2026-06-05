@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      1.0.7
+// @version      1.0.8
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
@@ -372,6 +372,20 @@
             }
           }
           parent = parent.$parent;
+        }
+      }
+
+      // 提取字段标签 (专门针对 ElDescriptions 组件，通杀 border 和非 border 模式)
+      if (!labelText) {
+        const descCell = input.closest('.el-descriptions-item__cell');
+        if (descCell) {
+          let labelEl = descCell.querySelector('.el-descriptions-item__label');
+          if (!labelEl && descCell.previousElementSibling && descCell.previousElementSibling.classList.contains('el-descriptions-item__label')) {
+            labelEl = descCell.previousElementSibling;
+          }
+          if (labelEl) {
+            labelText = (labelEl.innerText || labelEl.textContent || '').trim();
+          }
         }
       }
 

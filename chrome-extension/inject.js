@@ -379,6 +379,20 @@
         }
       }
 
+      // 提取字段标签 (专门针对 ElDescriptions 组件，通杀 border 和非 border 模式)
+      if (!labelText) {
+        const descCell = input.closest('.el-descriptions-item__cell');
+        if (descCell) {
+          let labelEl = descCell.querySelector('.el-descriptions-item__label');
+          if (!labelEl && descCell.previousElementSibling && descCell.previousElementSibling.classList.contains('el-descriptions-item__label')) {
+            labelEl = descCell.previousElementSibling;
+          }
+          if (labelEl) {
+            labelText = (labelEl.innerText || labelEl.textContent || '').trim();
+          }
+        }
+      }
+
       // 提取字段标签 (专门针对 ElTable 复杂表格的表头跨层级提取)
       if (!labelText) {
         const td = input.closest('td');
