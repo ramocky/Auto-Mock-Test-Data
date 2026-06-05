@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
+// @version      1.0.2
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
