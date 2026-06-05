@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      1.0.6
+// @version      1.0.7
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
@@ -390,10 +390,19 @@
         }
       }
 
-      // 提取字段标签 (终极兜底：向上5层寻找相邻兄弟元素的文字，通杀所有自定义栅格、表格、Descriptions布局)
+      // 提取字段标签 (专门针对原生 HTML 表格的相邻单元格提取)
+      if (!labelText) {
+        const cell = input.closest('td, th');
+        if (cell && cell.previousElementSibling) {
+          let text = (cell.previousElementSibling.innerText || cell.previousElementSibling.textContent || '').trim();
+          if (text && text.length > 0 && text.length < 50) labelText = text;
+        }
+      }
+
+      // 提取字段标签 (终极兜底：向上10层寻找相邻兄弟元素的文字，通杀所有自定义栅格、表格、Descriptions布局)
       if (!labelText) {
         let el = input;
-        for (let i = 0; i < 5; i++) {
+        for (let i = 0; i < 10; i++) {
           if (!el || el.tagName === 'BODY') break;
           let sibling = el.previousElementSibling;
           let siblingCount = 0; // 性能优化：横向最多只找前面3个兄弟节点，防止长列表节点爆炸卡顿
