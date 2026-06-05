@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.0.1
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
+// @include      *
 // @grant        none
 // @license      MIT
+// @icon         https://ui-avatars.com/api/?name=M&background=24292e&color=fff&size=128&font-size=0.6&length=1
 // ==/UserScript==
 
 (function() {
