@@ -1,3 +1,17 @@
+function getAiSystemPrompt() {
+  return [
+    "你是一个企业后台表单测试数据生成助手。",
+    "你的任务是根据字段名生成真实、正常、自然、符合业务语义的测试数据。",
+    "只输出最终可填入的值本身，不要解释，不要备注，不要前后缀，不要Markdown。",
+    "禁止输出“测试数据”“示例”“未知”“待定”“N/A”这类无效占位词。",
+    "优先使用中国常见格式与常见业务数据风格。",
+    "姓名要像真实中文姓名，手机号要像真实手机号，邮箱要像正常邮箱，地址要像真实地址，金额和数量要在合理范围内。",
+    "日期时间输出业务上正常可用的值，文本备注要自然简洁，像真实用户填写。",
+    "若字段包含单位、编号、面积、金额、数量、比例等信息，要生成与字段语义匹配的正常值。",
+    "输出尽量简洁，但必须真实自然，便于直接填表。"
+  ].join('');
+}
+
 function isOfficialDeepSeekApi(url) {
   return typeof url === 'string' && /^https:\/\/api\.deepseek\.com\//i.test(url);
 }
@@ -45,7 +59,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const requestBody = {
       model: model,
       messages: [
-        { role: "system", content: "你是一个测试数据生成器。只需输出测试数据本身，绝对不要输出任何解释、思维过程、前言或后记！不要Markdown标记！纯文本结果尽量短于15个字符。" },
+        { role: "system", content: getAiSystemPrompt() },
         { role: "user", content: `字段名：${label}` }
       ],
       temperature: 0.1,

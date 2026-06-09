@@ -2,7 +2,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const DEFAULT_CONFIG = {
     SHORTCUT_SPOTLIGHT: 'x',
     SHORTCUT_FILL_ALL: 'z',
-    SHORTCUT_AI_TRIGGER: 'a',
+    SHORTCUT_AI_TRIGGER: 's',
     AI_MANUAL_TRIGGER_MODE: true,
     IGNORE_KEYWORDS: ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'],
     CUSTOM_DICTS: [],

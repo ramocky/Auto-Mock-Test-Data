@@ -7,7 +7,7 @@
   const CONFIG = {
     SHORTCUT_SPOTLIGHT: 'x',
     SHORTCUT_FILL_ALL: 'z',
-    SHORTCUT_AI_TRIGGER: 'a',
+    SHORTCUT_AI_TRIGGER: 's',
     AI_MANUAL_TRIGGER_MODE: true,
     IGNORE_KEYWORDS: ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'],
     CUSTOM_DICTS: [],
@@ -243,7 +243,7 @@
   }
 
   function getAiShortcutText() {
-    return `Alt+${(CONFIG.SHORTCUT_AI_TRIGGER || 'a').toUpperCase()}`;
+    return `Alt+${(CONFIG.SHORTCUT_AI_TRIGGER || 's').toUpperCase()}`;
   }
 
   function isAiSuggestionComponent(componentName) {
@@ -387,11 +387,10 @@
   }
 
   // ==========================================
-  // 3. 无感填入气泡 (Smart Bubble)
+  // 3. 字段上下文与直达填入
   // ==========================================
-  let activeBubble = null;
   let spotlightTargetElement = null;
-  let currentBubbleSessionId = 0;
+  let currentAiRequestId = 0;
 
   function getVueInstance(input) {
     let vueInstance = null;
@@ -480,246 +479,149 @@
   }
 
 
-  
-  function hideSmartBubble() {
-    if (activeBubble) {
-      if (activeBubble._posInterval) clearInterval(activeBubble._posInterval);
-      activeBubble.remove();
-      activeBubble = null;
+  function getFieldContext(inputEl) {
+    if (!inputEl || (inputEl.tagName !== 'INPUT' && inputEl.tagName !== 'TEXTAREA')) return null;
+
+    const vueInstance = getVueInstance(inputEl);
+    const isNativeDisabled = inputEl.disabled || inputEl.hasAttribute('disabled') || inputEl.closest('.is-disabled');
+    const isVueDisabled = vueInstance && (vueInstance.disabled || vueInstance.inputDisabled || vueInstance.selectDisabled);
+    if (isNativeDisabled || isVueDisabled) return null;
+
+    const componentName = vueInstance && vueInstance.$options ? vueInstance.$options.name : '';
+    if ((inputEl.readOnly || inputEl.hasAttribute('readonly')) && !CustomHooks[componentName]) return null;
+
+    const labelText = getLabelForInput(inputEl, vueInstance);
+    let vModelExpr = '';
+    if (vueInstance && vueInstance.$vnode && vueInstance.$vnode.data && vueInstance.$vnode.data.model) {
+      vModelExpr = vueInstance.$vnode.data.model.expression || '';
     }
+
+    const ignoreList = CONFIG.IGNORE_KEYWORDS || ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'];
+    const labelLower = labelText.toLowerCase();
+    const modelLower = vModelExpr.toLowerCase();
+    const isIgnored = ignoreList.some(keyword => {
+      const kw = String(keyword == null ? '' : keyword).toLowerCase();
+      return kw && (labelLower.includes(kw) || (modelLower && modelLower.includes(kw)));
+    });
+    if (isIgnored) return null;
+
+    const hookAction = createHookFillAction(vueInstance, componentName, labelText);
+    return {
+      inputEl,
+      vueInstance,
+      componentName,
+      labelText,
+      hookAction,
+      supportsAiSuggestion: isAiSuggestionComponent(componentName),
+      localHookName: LocalHookDisplayNames[componentName] || '推荐值',
+      fallbackPrediction: predictMockType(labelText)
+    };
   }
 
-  function setBubbleTheme(bubble, theme) {
-    const themes = {
-      default: { background: 'rgba(64, 158, 255, 0.95)', color: '#fff', borderColor: 'rgba(255,255,255,0.2)' },
-      success: { background: '#e1f3d8', color: '#67c23a', borderColor: '#c2e7b0' },
-      warning: { background: '#fdf6ec', color: '#e6a23c', borderColor: '#faecd8' },
-      error: { background: '#fef0f0', color: '#f56c6c', borderColor: '#fbc4c4' }
-    };
-    const current = themes[theme] || themes.default;
-    bubble.style.background = current.background;
-    bubble.style.color = current.color;
-    bubble.style.borderColor = current.borderColor;
-    bubble.style.textShadow = 'none';
-    bubble.onmouseout = () => {
-      bubble.style.background = current.background;
-      bubble.style.color = current.color;
-      bubble.style.borderColor = current.borderColor;
-      bubble.style.transform = 'scale(1)';
-    };
+  function buildMockValueFromCommand(cmd) {
+    let mockValue = '';
+    if (cmd.startsWith('__custom_')) {
+      const idx = parseInt(cmd.replace('__custom_', ''), 10);
+      const dict = CONFIG.CUSTOM_DICTS[idx];
+      if (dict && dict.values && dict.values.length > 0) {
+        mockValue = dict.values[Math.floor(Math.random() * dict.values.length)];
+      } else {
+        mockValue = MockFactory.randomString();
+      }
+    } else if (MockFactory[cmd]) {
+      mockValue = MockFactory[cmd]();
+    } else {
+      mockValue = resolveMockType(cmd);
+    }
+    return mockValue;
+  }
+
+  function applyDirectCommandToInput(inputEl, cmd) {
+    if (!inputEl || !cmd) return false;
+    const mockValue = buildMockValueFromCommand(cmd);
+    fillElement(inputEl, mockValue);
+    return true;
+  }
+
+  function applyLocalFallback(context) {
+    if (context.hookAction) {
+      return context.hookAction();
+    }
+    if (context.fallbackPrediction) {
+      return applyDirectCommandToInput(context.inputEl, context.fallbackPrediction.cmd);
+    }
+    return false;
+  }
+
+  function applyAiResultToField(context, aiVal) {
+    const { inputEl, vueInstance, componentName, hookAction, supportsAiSuggestion, localHookName } = context;
+
+    if (typeof aiVal === 'string' && aiVal.trim()) {
+      if (supportsAiSuggestion) {
+        const matchedOption = matchAiSuggestionToOption(aiVal, vueInstance, componentName);
+        if (matchedOption) {
+          return matchedOption.apply();
+        }
+        if (hookAction) {
+          console.warn(`[AutoMock AI] 未命中候选项，已改用${localHookName}:`, aiVal);
+          return hookAction();
+        }
+        console.warn('[AutoMock AI] 未命中候选项，未执行写入:', aiVal);
+        return false;
+      }
+
+      fillElement(inputEl, aiVal);
+      return true;
+    }
+
+    if (aiVal && aiVal.error) {
+      console.warn('[AutoMock AI] 返回结果不可直接填入:', aiVal.error);
+    }
+    return applyLocalFallback(context);
+  }
+
+  async function fillFieldDirectly(inputEl, options = {}) {
+    const { aiOnly = false } = options;
+    const context = getFieldContext(inputEl);
+    if (!context) return false;
+
+    spotlightTargetElement = inputEl;
+    if (CONFIG.DEEPSEEK_API_KEY && !isLocalOnlyHookComponent(context.componentName)) {
+      const requestId = ++currentAiRequestId;
+      const aiPromptText = buildAiPromptText(context.labelText, context.vueInstance, context.componentName);
+      const aiVal = await askDeepSeek(context.labelText, aiPromptText);
+      if (requestId !== currentAiRequestId) return false;
+      return applyAiResultToField(context, aiVal);
+    }
+
+    if (aiOnly) return false;
+    return applyLocalFallback(context);
   }
 
   function triggerFocusedFieldAi() {
     if (!CONFIG.DEEPSEEK_API_KEY) return;
     const target = spotlightTargetElement || document.activeElement;
     if (!target || (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA')) return;
-    showSmartBubble(target, { forceAi: true });
-  }
-
-  async function showSmartBubble(inputEl, options = {}) {
-    hideSmartBubble();
-    const { forceAi = false } = options;
-    const vueInstance = getVueInstance(inputEl);
-    
-    const isNativeDisabled = inputEl.disabled || inputEl.hasAttribute('disabled') || inputEl.closest('.is-disabled');
-    const isVueDisabled = vueInstance && (vueInstance.disabled || vueInstance.inputDisabled || vueInstance.selectDisabled);
-    if (isNativeDisabled || isVueDisabled) return;
-
-    const componentName = vueInstance && vueInstance.$options ? vueInstance.$options.name : '';
-    if (inputEl.readOnly || inputEl.hasAttribute('readonly')) {
-      if (!CustomHooks[componentName]) return;
-    }
-
-    const labelText = getLabelForInput(inputEl, vueInstance);
-    
-    let vModelExpr = '';
-    if (vueInstance && vueInstance.$vnode && vueInstance.$vnode.data && vueInstance.$vnode.data.model) {
-      vModelExpr = vueInstance.$vnode.data.model.expression || '';
-    }
-    const ignoreList = CONFIG.IGNORE_KEYWORDS || ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'];
-    const isIgnored = ignoreList.some(keyword => {
-      const kw = keyword.toLowerCase();
-      return labelText.toLowerCase().includes(kw) || (vModelExpr && vModelExpr.toLowerCase().includes(kw));
+    fillFieldDirectly(target, { aiOnly: false }).catch(err => {
+      console.error('[AutoMock AI] 快捷键直填失败:', err);
     });
-    if (isIgnored) return;
-
-    let bubbleAction = null;
-    let displayText = null;
-    let shouldRunAi = false;
-    const hookAction = createHookFillAction(vueInstance, componentName, labelText);
-    const supportsAiSuggestion = isAiSuggestionComponent(componentName);
-    const localHookName = LocalHookDisplayNames[componentName] || '推荐值';
-
-    if (CONFIG.DEEPSEEK_API_KEY && !isLocalOnlyHookComponent(componentName)) {
-      if (forceAi || !isAiManualMode()) {
-        displayText = supportsAiSuggestion ? '✨ AI 匹配候选项中...' : '✨ AI 思考中...';
-        shouldRunAi = true;
-      } else {
-        displayText = supportsAiSuggestion ? `✨ ${getAiShortcutText()} AI匹配候选项` : `✨ ${getAiShortcutText()} AI填充当前字段`;
-      }
-    } else if (hookAction) {
-      displayText = `✨ 填入${localHookName}`;
-      bubbleAction = hookAction;
-    } else {
-      const prediction = predictMockType(labelText);
-      if (!prediction) return;
-      displayText = `✨ 填入${prediction.name}`;
-      bubbleAction = () => {
-        executeSpotlightCommand(prediction.cmd);
-        return true;
-      };
-    }
-
-    const sessionId = ++currentBubbleSessionId;
-
-    const bubble = document.createElement('div');
-    bubble.id = 'mock-ext-smart-bubble';
-    bubble.innerText = displayText;
-    bubble.style.cssText = `
-      position: fixed !important;
-      background: rgba(64, 158, 255, 0.95) !important;
-      color: #fff !important;
-      padding: 5px 12px !important;
-      border-radius: 14px !important;
-      font-size: 13px !important;
-      font-weight: 500 !important;
-      cursor: pointer !important;
-      z-index: 2147483647 !important;
-      box-shadow: 0 4px 12px rgba(64,158,255,0.4) !important;
-      font-family: sans-serif !important;
-      transition: all 0.2s !important;
-      user-select: none !important;
-      backdrop-filter: blur(4px) !important;
-      pointer-events: auto !important;
-      line-height: 1.5 !important;
-      white-space: nowrap !important;
-      border: 1px solid rgba(255,255,255,0.2) !important;
-    `;
-    
-    bubble.onmouseover = () => { bubble.style.background = '#66b1ff'; bubble.style.transform = 'scale(1.05)'; };
-    setBubbleTheme(bubble, 'default');
-    if (CONFIG.DEEPSEEK_API_KEY && isAiManualMode() && !shouldRunAi) {
-      bubble.title = `按 ${getAiShortcutText()} 后才会发起 AI 请求`;
-    }
-    bubble.onmousedown = (e) => {
-      e.preventDefault();
-      if (bubble.dataset.loading === 'true') return;
-      if (bubble.innerText.startsWith('❌') && !bubbleAction) return hideSmartBubble();
-      if (!bubbleAction) return;
-
-      const result = bubbleAction();
-      if (result === false) {
-        bubble.innerText = '❌ 当前字段未成功填入';
-        bubble.title = '未找到可用选项或组件拒绝写入';
-        setBubbleTheme(bubble, 'error');
-        setTimeout(hideSmartBubble, 2500);
-        return;
-      }
-
-      spotlightTargetElement = inputEl;
-      bubble.innerText = '✅ 已填入';
-      setBubbleTheme(bubble, 'success');
-      setTimeout(hideSmartBubble, 800);
-    };
-
-    document.body.appendChild(bubble);
-    activeBubble = bubble;
-
-    const updatePosition = () => {
-      if (!activeBubble || !document.body.contains(inputEl)) return hideSmartBubble();
-      const rect = inputEl.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) return hideSmartBubble();
-      const bHeight = activeBubble.offsetHeight || 28;
-      const bWidth = activeBubble.offsetWidth || 100;
-      activeBubble.style.top = (rect.top - bHeight - 4) + 'px';
-      activeBubble.style.left = (rect.right - bWidth) + 'px';
-    };
-    updatePosition();
-    activeBubble._posInterval = setInterval(updatePosition, 100);
-
-    if (shouldRunAi) {
-      bubble.dataset.loading = 'true';
-      const aiPromptText = buildAiPromptText(labelText, vueInstance, componentName);
-      const aiVal = await askDeepSeek(labelText, aiPromptText);
-      if (sessionId !== currentBubbleSessionId) return; // 焦点已移走
-      bubble.dataset.loading = 'false';
-      if (typeof aiVal === 'string' && aiVal.trim()) {
-        if (supportsAiSuggestion) {
-          const matchedOption = matchAiSuggestionToOption(aiVal, vueInstance, componentName);
-          if (matchedOption) {
-            bubbleAction = matchedOption.apply;
-            bubble.innerText = `✨ 建议选择：${matchedOption.label}`;
-            bubble.title = `AI建议：${aiVal}`;
-            setBubbleTheme(bubble, 'success');
-          } else if (hookAction) {
-            bubbleAction = hookAction;
-            bubble.innerText = `❌ AI未命中候选项，点击改用${localHookName}`;
-            bubble.title = `AI建议：${aiVal}`;
-            setBubbleTheme(bubble, 'warning');
-          } else {
-            bubbleAction = null;
-            bubble.innerText = `❌ AI未命中候选项：${aiVal.substring(0,40)}`;
-            bubble.title = aiVal;
-            setBubbleTheme(bubble, 'error');
-            setTimeout(hideSmartBubble, 4000);
-            return;
-          }
-        } else {
-          bubbleAction = () => {
-            fillElement(inputEl, aiVal);
-            return true;
-          };
-          bubble.innerText = `✨ 填入：${aiVal}`;
-          bubble.title = aiVal;
-          setBubbleTheme(bubble, 'success');
-        }
-      } else {
-        const fallbackPrediction = !hookAction ? predictMockType(labelText) : null;
-        if (hookAction) {
-          bubbleAction = hookAction;
-          bubble.innerText = aiVal && aiVal.error
-            ? `❌ AI失败，点击改用${localHookName}`
-            : `✨ 点击改用${localHookName}`;
-          bubble.title = aiVal.error;
-          setBubbleTheme(bubble, 'warning');
-        } else if (fallbackPrediction) {
-          bubbleAction = () => {
-            executeSpotlightCommand(fallbackPrediction.cmd);
-            return true;
-          };
-          bubble.innerText = aiVal && aiVal.error
-            ? `❌ AI失败，点击改填${fallbackPrediction.name}`
-            : `✨ 填入${fallbackPrediction.name}`;
-          bubble.title = aiVal && aiVal.error ? aiVal.error : '';
-          setBubbleTheme(bubble, 'warning');
-        } else if (aiVal && aiVal.error) {
-          bubble.innerText = `❌ AI错误: ${aiVal.error.substring(0,80)}`;
-          bubble.title = aiVal.error;
-          setBubbleTheme(bubble, 'error');
-          setTimeout(hideSmartBubble, 4000);
-          return;
-        } else {
-          hideSmartBubble();
-          return;
-        }
-      }
-      updatePosition();
-    }
   }
 
   // 持续跟踪全局最后一个处于聚焦状态的输入框
   document.addEventListener('focusin', (e) => {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
       spotlightTargetElement = e.target;
-      setTimeout(() => showSmartBubble(e.target), 10);
+      if (CONFIG.DEEPSEEK_API_KEY && !isAiManualMode()) {
+        const target = e.target;
+        setTimeout(() => {
+          if (spotlightTargetElement !== target) return;
+          fillFieldDirectly(target, { aiOnly: true }).catch(err => {
+            console.error('[AutoMock AI] 自动直填失败:', err);
+          });
+        }, 10);
+      }
     }
   }, true);
-
-  document.addEventListener('mousedown', (e) => {
-    if (activeBubble && e.target !== activeBubble && e.target !== spotlightTargetElement) {
-      hideSmartBubble();
-    }
-  });
 
   function createSpotlightUI() {
     let container = document.getElementById('mock-ext-spotlight');
@@ -948,25 +850,7 @@
       alert("Auto Mock: 请先将光标点击聚焦到需要插入的输入框内，再唤出控制台！");
       return;
     }
-
-    const inputEl = spotlightTargetElement;
-    let mockValue = '';
-    
-    if (cmd.startsWith('__custom_')) {
-      const idx = parseInt(cmd.replace('__custom_', ''), 10);
-      const dict = CONFIG.CUSTOM_DICTS[idx];
-      if (dict && dict.values && dict.values.length > 0) {
-        mockValue = dict.values[Math.floor(Math.random() * dict.values.length)];
-      } else {
-        mockValue = MockFactory.randomString();
-      }
-    } else if (MockFactory[cmd]) {
-      mockValue = MockFactory[cmd]();
-    } else {
-      mockValue = resolveMockType(cmd);
-    }
-
-    fillElement(inputEl, mockValue);
+    applyDirectCommandToInput(spotlightTargetElement, cmd);
   }
 
   function fillElement(inputEl, mockValue) {
