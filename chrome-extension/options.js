@@ -1,8 +1,18 @@
 document.addEventListener('DOMContentLoaded', () => {
-  const defaultKeywords = ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'];
+  const DEFAULT_CONFIG = {
+    SHORTCUT_SPOTLIGHT: 'x',
+    SHORTCUT_FILL_ALL: 'z',
+    SHORTCUT_AI_TRIGGER: 'a',
+    AI_MANUAL_TRIGGER_MODE: true,
+    IGNORE_KEYWORDS: ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'],
+    CUSTOM_DICTS: [],
+    DEEPSEEK_API_URL: 'https://api.deepseek.com/v1/chat/completions',
+    DEEPSEEK_API_MODEL: 'deepseek-v4-flash',
+    DEEPSEEK_API_KEY: ''
+  };
+
+  let currentConfig = {};
   let currentKeywords = [];
-  let shortcutSpotlight = 'x';
-  let shortcutFill = 'z';
 
   const tagsContainer = document.getElementById('tagsContainer');
   const newKeywordInput = document.getElementById('newKeyword');
@@ -11,33 +21,44 @@ document.addEventListener('DOMContentLoaded', () => {
   const statusEl = document.getElementById('status');
   const inputSpotlight = document.getElementById('shortcutSpotlight');
   const inputFill = document.getElementById('shortcutFill');
+  const inputAiTrigger = document.getElementById('shortcutAiTrigger');
+  const customDictsEl = document.getElementById('customDicts');
+  const aiManualTriggerModeEl = document.getElementById('aiManualTriggerMode');
+  const deepseekApiUrlEl = document.getElementById('deepseekApiUrl');
+  const deepseekApiModelEl = document.getElementById('deepseekApiModel');
+  const deepseekApiKeyEl = document.getElementById('deepseekApiKey');
 
   // 初始化加载配置
-  chrome.storage.sync.get(['ignoreKeywords', 'shortcutSpotlight', 'shortcutFill'], (result) => {
-    currentKeywords = result.ignoreKeywords || defaultKeywords;
-    shortcutSpotlight = result.shortcutSpotlight || 'x';
-    shortcutFill = result.shortcutFill || 'z';
+  chrome.storage.sync.get(['auto_mock_config'], (result) => {
+    currentConfig = result.auto_mock_config || { ...DEFAULT_CONFIG };
+    currentConfig = { ...DEFAULT_CONFIG, ...currentConfig };
+    currentKeywords = currentConfig.IGNORE_KEYWORDS || [];
     
-    inputSpotlight.value = shortcutSpotlight.toUpperCase();
-    inputFill.value = shortcutFill.toUpperCase();
+    inputSpotlight.value = currentConfig.SHORTCUT_SPOTLIGHT.toUpperCase();
+    inputFill.value = currentConfig.SHORTCUT_FILL_ALL.toUpperCase();
+    inputAiTrigger.value = currentConfig.SHORTCUT_AI_TRIGGER.toUpperCase();
+    customDictsEl.value = currentConfig.CUSTOM_DICTS ? JSON.stringify(currentConfig.CUSTOM_DICTS, null, 2) : '';
+    aiManualTriggerModeEl.checked = currentConfig.AI_MANUAL_TRIGGER_MODE !== false;
+    deepseekApiUrlEl.value = currentConfig.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions';
+    deepseekApiModelEl.value = currentConfig.DEEPSEEK_API_MODEL || 'deepseek-v4-flash';
+    deepseekApiKeyEl.value = currentConfig.DEEPSEEK_API_KEY || '';
     renderTags();
   });
 
   // 绑定快捷键输入逻辑
-  function bindShortcutInput(inputEl, keyName) {
+  function bindShortcutInput(inputEl, keyField) {
     inputEl.addEventListener('keydown', (e) => {
       e.preventDefault();
-      // 忽略单纯修饰键
       if (['Alt', 'Control', 'Shift', 'Meta'].includes(e.key)) return;
       
       const newKey = e.key.toLowerCase();
       inputEl.value = newKey.toUpperCase();
-      if (keyName === 'spotlight') shortcutSpotlight = newKey;
-      if (keyName === 'fill') shortcutFill = newKey;
+      currentConfig[keyField] = newKey;
     });
   }
-  bindShortcutInput(inputSpotlight, 'spotlight');
-  bindShortcutInput(inputFill, 'fill');
+  bindShortcutInput(inputSpotlight, 'SHORTCUT_SPOTLIGHT');
+  bindShortcutInput(inputFill, 'SHORTCUT_FILL_ALL');
+  bindShortcutInput(inputAiTrigger, 'SHORTCUT_AI_TRIGGER');
 
   // 渲染标签
   function renderTags() {
@@ -77,11 +98,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 保存配置
   saveBtn.addEventListener('click', () => {
-    chrome.storage.sync.set({ 
-      ignoreKeywords: currentKeywords,
-      shortcutSpotlight: shortcutSpotlight,
-      shortcutFill: shortcutFill
-    }, () => {
+    let parsedDicts = [];
+    const dictText = customDictsEl.value.trim();
+    if (dictText) {
+      try {
+        parsedDicts = JSON.parse(dictText);
+        if (!Array.isArray(parsedDicts)) throw new Error("Not an array");
+      } catch (e) {
+        alert("自定义字典 JSON 格式错误，请检查！\n" + e.message);
+        return;
+      }
+    }
+
+    currentConfig.IGNORE_KEYWORDS = currentKeywords;
+    currentConfig.CUSTOM_DICTS = parsedDicts;
+    currentConfig.AI_MANUAL_TRIGGER_MODE = aiManualTriggerModeEl.checked;
+    currentConfig.DEEPSEEK_API_URL = deepseekApiUrlEl.value.trim() || 'https://api.deepseek.com/v1/chat/completions';
+    currentConfig.DEEPSEEK_API_MODEL = deepseekApiModelEl.value.trim() || 'deepseek-v4-flash';
+    currentConfig.DEEPSEEK_API_KEY = deepseekApiKeyEl.value.trim();
+
+    chrome.storage.sync.set({ auto_mock_config: currentConfig }, () => {
       statusEl.style.display = 'block';
       setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
 
@@ -91,11 +127,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (tab.url && !tab.url.startsWith('chrome://')) {
             chrome.tabs.sendMessage(tab.id, { 
               action: "updateConfig", 
-              config: { 
-                ignoreKeywords: currentKeywords,
-                shortcutSpotlight: shortcutSpotlight,
-                shortcutFill: shortcutFill
-              } 
+              config: currentConfig
             }).catch(err => {}); // 忽略无法接收消息的标签页
           }
         }

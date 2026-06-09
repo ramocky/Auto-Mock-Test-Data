@@ -13,14 +13,18 @@ if (!window._mockExtInjected) {
   window._mockExtInjected = true;
   
   // 从存储中读取用户配置并发送给 inject.js
-  chrome.storage.sync.get(['ignoreKeywords', 'shortcutSpotlight', 'shortcutFill'], function(result) {
+  chrome.storage.sync.get(['auto_mock_config'], function(result) {
     const defaultKeywords = ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'];
-    
-    const configData = {
-      ignoreKeywords: result.ignoreKeywords || defaultKeywords,
-      shortcutSpotlight: result.shortcutSpotlight || 'x',
-      shortcutFill: result.shortcutFill || 'z'
-    };
+    let configData = result.auto_mock_config || {};
+    // 兼容补全
+    configData.IGNORE_KEYWORDS = configData.IGNORE_KEYWORDS || defaultKeywords;
+    configData.SHORTCUT_SPOTLIGHT = configData.SHORTCUT_SPOTLIGHT || 'x';
+    configData.SHORTCUT_FILL_ALL = configData.SHORTCUT_FILL_ALL || 'z';
+    configData.SHORTCUT_AI_TRIGGER = configData.SHORTCUT_AI_TRIGGER || 'a';
+    if (typeof configData.AI_MANUAL_TRIGGER_MODE !== 'boolean') configData.AI_MANUAL_TRIGGER_MODE = true;
+    configData.DEEPSEEK_API_URL = configData.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions';
+    configData.DEEPSEEK_API_MODEL = configData.DEEPSEEK_API_MODEL || 'deepseek-v4-flash';
+    configData.DEEPSEEK_API_KEY = configData.DEEPSEEK_API_KEY || '';
     
     // 异步注入，延迟发送
     setTimeout(() => {
@@ -28,6 +32,24 @@ if (!window._mockExtInjected) {
     }, 500);
   });
 }
+
+// 监听网页发来的 DeepSeek 请求，转发给 background
+window.addEventListener("message", function(event) {
+  if (event.source !== window || !event.data) return;
+  if (event.data.type === "DEEPSEEK_REQUEST") {
+    try {
+      chrome.runtime.sendMessage({ action: "deepseek_request", payload: event.data.payload }, (response) => {
+        if (chrome.runtime.lastError) {
+          window.postMessage({ type: "DEEPSEEK_RESPONSE", reqId: event.data.reqId, response: { success: false, error: chrome.runtime.lastError.message } }, "*");
+        } else {
+          window.postMessage({ type: "DEEPSEEK_RESPONSE", reqId: event.data.reqId, response: response }, "*");
+        }
+      });
+    } catch (e) {
+      window.postMessage({ type: "DEEPSEEK_RESPONSE", reqId: event.data.reqId, response: { success: false, error: e.message } }, "*");
+    }
+  }
+});
 
 // 监听来自扩展 (popup, background, options) 的消息
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

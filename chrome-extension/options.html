@@ -148,6 +148,10 @@
         <span style="width: 140px; font-size: 14px; color: #606266;">一键全填表单 (Alt +)</span>
         <input type="text" id="shortcutFill" class="shortcut-input" readonly title="点击并按下新按键" />
       </div>
+      <div class="input-row">
+        <span style="width: 140px; font-size: 14px; color: #606266;">AI 单字段填充 (Alt +)</span>
+        <input type="text" id="shortcutAiTrigger" class="shortcut-input" readonly title="点击并按下新按键" />
+      </div>
     </div>
 
     <div class="form-group">
@@ -159,6 +163,36 @@
       <div class="input-row">
         <input type="text" id="newKeyword" placeholder="输入需要忽略的字段名片段（如：id）" />
         <button id="addBtn">添加过滤词</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>🔧 自定义数据字典 (扩展规则)</label>
+      <div class="help-text">使用 JSON 数组格式配置您专属的扩展词典。</div>
+      <textarea id="customDicts" rows="5" style="width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; font-family: monospace; font-size: 13px;" placeholder='[\n  { "label": "测试账号", "regex": "账号|account", "values": ["test01", "test02"] }\n]'></textarea>
+    </div>
+
+    <div class="form-group">
+      <label>🤖 大模型智能交互 (兼容 OpenAI 格式)</label>
+      <div class="help-text">只要是兼容 OpenAI 格式的 API 都能接入。默认填入 DeepSeek 配置。清空 Key 即可关闭此功能。</div>
+      <div class="input-row" style="align-items: flex-start;">
+        <span style="width: 100px; font-size: 14px; color: #606266;">触发模式:</span>
+        <label style="display: flex; align-items: center; gap: 8px; font-weight: 400; margin-bottom: 0;">
+          <input type="checkbox" id="aiManualTriggerMode" checked />
+          开启手动触发模式，选中字段后按快捷键才开始 AI 思考
+        </label>
+      </div>
+      <div class="input-row">
+        <span style="width: 100px; font-size: 14px; color: #606266;">API URL:</span>
+        <input type="text" id="deepseekApiUrl" placeholder="https://api.deepseek.com/v1/chat/completions" />
+      </div>
+      <div class="input-row">
+        <span style="width: 100px; font-size: 14px; color: #606266;">Model Name:</span>
+        <input type="text" id="deepseekApiModel" placeholder="deepseek-v4-flash" />
+      </div>
+      <div class="input-row">
+        <span style="width: 100px; font-size: 14px; color: #606266;">API Key:</span>
+        <input type="password" id="deepseekApiKey" placeholder="sk-..." />
       </div>
     </div>
 
