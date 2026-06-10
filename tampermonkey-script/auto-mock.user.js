@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      1.2.2
+// @version      1.2.8
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
@@ -17,7 +17,6 @@
 
 (function() {
   'use strict';
-  console.log("Auto Mock UserScript loaded.");
 
   // ==========================================
   // [用户配置区] 扩展动态配置参数
@@ -27,6 +26,8 @@
     SHORTCUT_FILL_ALL: 'z',
     SHORTCUT_AI_TRIGGER: 's',
     AI_MANUAL_TRIGGER_MODE: true,
+    AI_ENABLE_CLASSIFICATION: true,
+    AI_ENABLE_PRELOAD: true,
     IGNORE_KEYWORDS: ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'],
     CUSTOM_DICTS: [],
     DEEPSEEK_API_URL: 'https://api.deepseek.com/v1/chat/completions',
@@ -144,51 +145,169 @@
       const lasts = ['Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis','Rodriguez','Martinez'];
       return firsts[Math.floor(Math.random() * firsts.length)] + ' ' + lasts[Math.floor(Math.random() * lasts.length)];
     },
+    gender: () => (Math.random() > 0.5 ? '男' : '女'),
+    nickname: () => {
+      const prefixes = ['测试', '演示', '体验', '样例', '模拟'];
+      return prefixes[Math.floor(Math.random() * prefixes.length)] + '用户' + Math.floor(Math.random() * 9000 + 1000);
+    },
+    department: () => {
+      const departments = ['总经办', '研发部', '产品部', '市场部', '销售部', '财务部', '人事部', '运营部', '采购部', '客服部'];
+      return departments[Math.floor(Math.random() * departments.length)];
+    },
+    accountName: () => {
+      const prefixes = ['test', 'demo', 'user', 'mock', 'auto'];
+      return prefixes[Math.floor(Math.random() * prefixes.length)] + '_' + Math.random().toString(36).substring(2, 8);
+    },
+    jobNumber: () => 'EMP' + Math.floor(Math.random() * 900000 + 100000),
+    orderNo: () => {
+      const d = new Date();
+      const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
+      return 'ORD' + stamp + Math.floor(Math.random() * 900 + 100);
+    },
+    percentage: () => (Math.random() * 100).toFixed(2) + '%',
+    city: () => {
+      const cities = ['北京市', '上海市', '广州市', '深圳市', '杭州市', '厦门市', '成都市', '武汉市'];
+      return cities[Math.floor(Math.random() * cities.length)];
+    },
     age: () => Math.floor(Math.random() * 43) + 18,
     amount: () => (Math.random() * 9999).toFixed(2),
-    color: () => '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')
+    color: () => '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0'),
+    dateTime: () => {
+      const d = new Date(Date.now() - Math.floor(Math.random() * 10000000000));
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+    }
   };
 
-  const predictMockType = (label) => {
-    label = (label || '').toLowerCase();
+  const BUILTIN_MOCK_GROUPS = [
+    {
+      title: '👤 个人信息',
+      items: [
+        { label: '人名', cmd: 'name', hints: '姓名、联系人、负责人、收件人', patterns: [/姓名|名字|联系人|负责人|收件人|持卡人|真实姓名|法人|客户名/, /\bname\b/, /real.?name/, /full.?name/] },
+        { label: '英文名', cmd: 'englishName', hints: '英文姓名、英文联系人', patterns: [/英文名|英文姓名/, /\benglish\b/, /english.?name/] },
+        { label: '性别', cmd: 'gender', hints: '性别、男女、先生女士', patterns: [/性别|男女|先生|女士|称谓/, /\bgender\b/] },
+        { label: '昵称', cmd: 'nickname', hints: '昵称、花名、显示名', patterns: [/昵称|花名|别名|显示名/, /\bnick\b/] },
+        { label: '身份证', cmd: 'idcard', hints: '身份证、证件号', patterns: [/身份证|证件号|身份号码/, /\bidcard\b/, /id_card/] },
+        { label: '年龄', cmd: 'age', hints: '年龄、岁数', patterns: [/年龄|岁数/, /\bage\b/] },
+        { label: '手机号', cmd: 'phone', hints: '手机号、联系电话、手机号码', patterns: [/手机|电话|联系方式|联系号码|手机号/, /\bphone\b/, /\bmobile\b/, /\btel\b/] },
+        { label: '邮箱', cmd: 'email', hints: '邮箱、电子邮件', patterns: [/邮箱|邮件/, /\bemail\b/, /e-mail/, /\bmail\b/] }
+      ]
+    },
+    {
+      title: '🏢 企业与业务',
+      items: [
+        { label: '企业名称', cmd: 'company', hints: '公司、企业、单位、商户', patterns: [/公司|企业|单位|商户|厂商|供应商/, /\bcompany\b/] },
+        { label: '信用代码', cmd: 'creditCode', hints: '统一社会信用代码、企业代码', patterns: [/信用代码|统一社会信用代码|企业代码/, /\bcredit\b/] },
+        { label: '职务头衔', cmd: 'title', hints: '职务、岗位、职位、头衔', patterns: [/头衔|职务|岗位|职位|职称/, /\btitle\b/, /\bposition\b/, /\bjob\b/] },
+        { label: '部门名称', cmd: 'department', hints: '部门、科室、事业部、小组', patterns: [/部门|科室|中心|事业部|小组/, /\bdepartment\b/] },
+        { label: '账号名称', cmd: 'accountName', hints: '账号、账户、用户名、登录名', patterns: [/账号|账户|用户名|登录名/, /\baccount\b/, /\blogin\b/, /user(?:name)?/] },
+        { label: '工号编号', cmd: 'jobNumber', hints: '工号、员工号、人员编号、学号', patterns: [/工号|员工号|员工编号|人员编号|学号/, /jobno/, /job_no/, /employee_no/] },
+        { label: '订单编号', cmd: 'orderNo', hints: '订单号、单号、流水号、运单号', patterns: [/订单号|订单编号|单号|流水号|运单号/, /\border\b/, /\bserial\b/] },
+        { label: '车牌号', cmd: 'licensePlate', hints: '车牌、车牌号', patterns: [/车牌/, /license_plate/] },
+        { label: '银行卡', cmd: 'bankCard', hints: '银行卡、卡号', patterns: [/银行卡|卡号/, /bankcard/, /bank_card/] },
+        { label: '金额数值', cmd: 'amount', hints: '金额、费用、价款、钱', patterns: [/金额|价税合计|价款|费用|货款|钱|元/, /\bamount\b/, /\bmoney\b/] },
+        { label: '百分比', cmd: 'percentage', hints: '比例、百分比、税率、折扣', patterns: [/比例|百分比|占比|税率|折扣/, /\bpercent\b/, /\brate\b/] }
+      ]
+    },
+    {
+      title: '🌐 网络与位置',
+      items: [
+        { label: '详细地址', cmd: 'address', hints: '联系地址、收货地址、住址', patterns: [/详细地址|联系地址|开户地址|收货地址|住址|通讯地址/, /\baddress\b/] },
+        { label: '所在城市', cmd: 'city', hints: '城市、地区、归属地、省市', patterns: [/城市|地区|区域|归属地|省市/, /\bcity\b/, /\bregion\b/, /\blocation\b/] },
+        { label: '邮政编码', cmd: 'zipCode', hints: '邮编、邮政编码', patterns: [/邮编|邮政编码/, /\bzipcode\b/, /\bpostal\b/] },
+        { label: 'IP地址', cmd: 'ipv4', hints: 'IP 地址、内网地址', patterns: [/ip地址/, /\bipv4\b/, /ip_/] },
+        { label: 'MAC地址', cmd: 'mac', hints: 'MAC 地址、物理地址', patterns: [/\bmac\b/, /物理地址/] },
+        { label: '随机链接', cmd: 'url', hints: '网址、链接、主页', patterns: [/网址|链接|主页/, /\burl\b/, /\bwebsite\b/, /\blink\b/] },
+        { label: '强密码', cmd: 'password', hints: '密码、登录密码', patterns: [/密码/, /\bpassword\b/, /\bpwd\b/] }
+      ]
+    },
+    {
+      title: '📝 日期与文本',
+      items: [
+        { label: '日期', cmd: 'date', hints: '日期、生日、生效日期', patterns: [/日期|生日|生效日期|到期日期/, /\bdate\b/] },
+        { label: '时间', cmd: 'time', hints: '时间、时刻', patterns: [/时间|时刻/, /\btime\b/] },
+        { label: '日期时间', cmd: 'dateTime', hints: '日期时间、开始时间、结束时间', patterns: [/日期时间|时间戳|开始时间|结束时间|创建时间|更新时间/, /\bdatetime\b/] },
+        { label: '随机数字', cmd: 'number', hints: '数字、数量、库存、价格', patterns: [/数字|数量|库存|总数|价格/, /\bnum\b/, /\bcount\b/, /\bprice\b/] },
+        { label: '颜色值', cmd: 'color', hints: '颜色、色值', patterns: [/颜色|色值/, /\bcolor\b/] },
+        { label: '简短文本', cmd: 'randomString', hints: '标题、简称、主题、标签', patterns: [/简称|标题|主题|短描述|标签|摘要|关键字/, /short.?text/] },
+        { label: '长文本段落', cmd: 'text', hints: '描述、备注、详情、内容、说明', patterns: [/文本|描述|备注|详情|内容|说明|原因|留言/, /\btext\b/, /\bdesc\b/, /\bcontent\b/, /\bremark\b/] }
+      ]
+    }
+  ];
+
+  const BUILTIN_MOCK_ITEMS = BUILTIN_MOCK_GROUPS.reduce((list, group) => {
+    group.items.forEach(item => list.push({ ...item, groupTitle: group.title }));
+    return list;
+  }, []);
+
+  function getBuiltInMockGroups() {
+    return BUILTIN_MOCK_GROUPS.map(group => ({
+      title: group.title,
+      items: group.items.map(item => ({ label: item.label, cmd: item.cmd }))
+    }));
+  }
+
+  function getBuiltInMockItem(cmd) {
+    for (let i = 0; i < BUILTIN_MOCK_ITEMS.length; i++) {
+      if (BUILTIN_MOCK_ITEMS[i].cmd === cmd) return BUILTIN_MOCK_ITEMS[i];
+    }
+    return null;
+  }
+
+  function getDisplayItemByCommand(cmd) {
+    if (!cmd) return null;
+    if (cmd.startsWith('__custom_')) {
+      const idx = parseInt(cmd.replace('__custom_', ''), 10);
+      const dict = CONFIG.CUSTOM_DICTS[idx];
+      return dict ? { label: dict.label || ('自定义项' + (idx + 1)), cmd } : null;
+    }
+    if (cmd === '__hook_default') return { label: '推荐操作', cmd };
+    const builtInItem = getBuiltInMockItem(cmd);
+    return builtInItem ? { label: builtInItem.label, cmd: builtInItem.cmd } : null;
+  }
+
+  function predictMockTypes(label, limit = 3) {
+    const labelText = String(label == null ? '' : label).trim();
+    const labelLower = labelText.toLowerCase();
+    const predictions = [];
+
     if (CONFIG.CUSTOM_DICTS && CONFIG.CUSTOM_DICTS.length > 0) {
       for (let i = 0; i < CONFIG.CUSTOM_DICTS.length; i++) {
-        let dict = CONFIG.CUSTOM_DICTS[i];
-        if (dict.regex) {
-          try {
-            if (new RegExp(dict.regex, 'i').test(label)) {
-              return { cmd: '__custom_' + i, name: dict.label || '自定义值' };
-            }
-          } catch (e) {
-            console.error("Auto Mock Regex Error:", e);
+        const dict = CONFIG.CUSTOM_DICTS[i];
+        if (!dict || !dict.regex) continue;
+        try {
+          if (new RegExp(dict.regex, 'i').test(labelLower)) {
+            predictions.push({ cmd: '__custom_' + i, name: dict.label || '自定义值', score: 1000 - i });
           }
+        } catch (e) {
+          console.error("Auto Mock Regex Error:", e);
         }
       }
     }
-    if (/姓名|名字|人名|称呼|人|name|user/.test(label)) return {cmd: 'name', name: '人名'};
-    if (/英文名|english/.test(label)) return {cmd: 'englishName', name: '英文名'};
-    if (/手机|电话|联系方式|联系号码|phone|mobile|tel/.test(label)) return {cmd: 'phone', name: '手机号'};
-    if (/邮箱|邮件|email|e-mail|mail/.test(label)) return {cmd: 'email', name: '邮箱'};
-    if (/身份证|证件号|idcard|id_card/.test(label)) return {cmd: 'idcard', name: '身份证'};
-    if (/年龄|age/.test(label)) return {cmd: 'age', name: '年龄'};
-    if (/信用代码|企业代码|credit/.test(label)) return {cmd: 'creditCode', name: '信用代码'};
-    if (/公司|企业|单位|company/.test(label)) return {cmd: 'company', name: '企业名称'};
-    if (/车牌|license_plate/.test(label)) return {cmd: 'licensePlate', name: '车牌号'};
-    if (/邮编|zipcode|postal/.test(label)) return {cmd: 'zipCode', name: '邮政编码'};
-    if (/ip地址|ipv4|ip_/.test(label)) return {cmd: 'ipv4', name: 'IP地址'};
-    if (/mac|物理地址/.test(label)) return {cmd: 'mac', name: 'MAC地址'};
-    if (/密码|password|pwd/.test(label)) return {cmd: 'password', name: '强密码'};
-    if (/颜色|color/.test(label)) return {cmd: 'color', name: '颜色值'};
-    if (/卡号|银行卡|账号|account|card/.test(label)) return {cmd: 'bankCard', name: '银行卡'};
-    if (/头衔|职务|岗位|职位|职称|title|position|job/.test(label)) return {cmd: 'title', name: '职务头衔'};
-    if (/地址|地点|区域|省|市|区|address|location|region/.test(label)) return {cmd: 'address', name: '详细地址'};
-    if (/网址|链接|主页|url|website|link/.test(label)) return {cmd: 'url', name: '随机链接'};
-    if (/日期|时间|date|time/.test(label)) return {cmd: 'date', name: '日期'};
-    if (/文本|描述|备注|详情|内容|text|desc|content|remark/.test(label)) return {cmd: 'text', name: '文本段落'};
-    if (/金额|钱|元|amount|money/.test(label)) return {cmd: 'amount', name: '金额'};
-    if (/数字|数量|金额|库存|总数|价格|num|count|price/.test(label)) return {cmd: 'number', name: '数字'};
-    return null;
-  };
+
+    BUILTIN_MOCK_ITEMS.forEach((item, index) => {
+      let score = 0;
+      item.patterns.forEach(pattern => {
+        if (pattern.test(labelLower)) score += 10;
+      });
+      if (score > 0) {
+        predictions.push({ cmd: item.cmd, name: item.label, score, index });
+      }
+    });
+
+    predictions.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return (a.index || 0) - (b.index || 0);
+    });
+
+    const deduped = [];
+    predictions.forEach(item => {
+      if (deduped.some(existing => existing.cmd === item.cmd)) return;
+      deduped.push({ cmd: item.cmd, name: item.name });
+    });
+    return deduped.slice(0, limit);
+  }
+
+  const predictMockType = (label) => predictMockTypes(label, 1)[0] || null;
 
   const resolveMockType = (label) => {
     const prediction = predictMockType(label);
@@ -259,10 +378,6 @@
     ElSwitch: '开启状态'
   };
 
-  function isAiManualMode() {
-    return Boolean(CONFIG.DEEPSEEK_API_KEY) && CONFIG.AI_MANUAL_TRIGGER_MODE !== false;
-  }
-
   function getAiShortcutText() {
     return `Alt+${(CONFIG.SHORTCUT_AI_TRIGGER || 's').toUpperCase()}`;
   }
@@ -324,67 +439,92 @@
     return [];
   }
 
-  function buildAiPromptText(labelText, vueInstance, componentName) {
-    if (!isAiSuggestionComponent(componentName)) return labelText;
+  function getAiRecommendationPrompt(context) {
+    const lines = [];
+    const labelText = String(context && context.labelText ? context.labelText : '').trim();
+    lines.push(`字段名：${labelText || '未识别'}`);
+    if (context && context.componentName) lines.push(`组件类型：${context.componentName}`);
 
-    const options = getCandidateOptions(vueInstance, componentName);
-    if (options.length === 0) return labelText;
+    if (context && context.hookAction) {
+      lines.push(`组件推荐：__hook_default|${context.localHookName}|优先使用当前组件的内置可用操作`);
+    }
 
-    const optionLabels = options.slice(0, 20).map(opt => opt.label);
-    return `${labelText}\n候选项：${optionLabels.join('、')}\n请只返回候选项中的一个原文，不要解释。`;
+    const builtInChoices = BUILTIN_MOCK_ITEMS.map(item => `${item.cmd}|${item.label}|${item.hints}`).join('\n');
+    lines.push('可选类目：');
+    lines.push(builtInChoices);
+
+    if (CONFIG.CUSTOM_DICTS && CONFIG.CUSTOM_DICTS.length > 0) {
+      const customChoices = CONFIG.CUSTOM_DICTS.map((dict, index) => `__custom_${index}|${dict.label || ('自定义项' + (index + 1))}|${dict.regex || '自定义规则'}`).join('\n');
+      lines.push('自定义类目：');
+      lines.push(customChoices);
+    }
+
+    if (context && context.supportsAiSuggestion) {
+      const options = getCandidateOptions(context.vueInstance, context.componentName);
+      if (options.length > 0) {
+        lines.push(`当前候选项：${options.slice(0, 20).map(opt => opt.label).join('、')}`);
+      }
+    }
+
+    lines.push('请从以上类目中选择最适合当前字段的 1 到 3 个 cmd，按优先级返回，仅返回 JSON 数组，例如 ["name","phone"]。');
+    return lines.join('\n');
   }
 
-  function getAiSystemPrompt() {
+  function getAiRecommendationSystemPrompt() {
     return [
-      "你是一个企业后台表单测试数据生成助手。",
-      "你的任务是根据字段名生成真实、正常、自然、符合业务语义的测试数据。",
-      "只输出最终可填入的值本身，不要解释，不要备注，不要前后缀，不要Markdown。",
-      "禁止输出“测试数据”“示例”“未知”“待定”“N/A”这类无效占位词。",
-      "优先使用中国常见格式与常见业务数据风格。",
-      "姓名要像真实中文姓名，手机号要像真实手机号，邮箱要像正常邮箱，地址要像真实地址，金额和数量要在合理范围内。",
-      "日期时间输出业务上正常可用的值，文本备注要自然简洁，像真实用户填写。",
-      "若字段包含单位、编号、面积、金额、数量、比例等信息，要生成与字段语义匹配的正常值。",
-      "输出尽量简洁，但必须真实自然，便于直接填表。"
+      "你是一个企业后台表单字段类目推荐助手。",
+      "你的任务不是生成填充值，而是从给定类目列表中挑选最适合当前字段的内部 cmd。",
+      "必须只从提供的 cmd 中选择，不能编造新 cmd。",
+      "最多返回 3 个 cmd，按最匹配到次匹配排序。",
+      "只返回 JSON 数组，不要解释，不要 Markdown，不要额外文本。"
     ].join('');
   }
 
-  function matchAiSuggestionToOption(aiText, vueInstance, componentName) {
-    const options = getCandidateOptions(vueInstance, componentName);
-    if (options.length === 0) return null;
+  function parseAiRecommendationResult(rawText) {
+    if (typeof rawText !== 'string' || !rawText.trim()) {
+      return { error: 'AI 未返回推荐类目' };
+    }
 
-    const aiNormalized = normalizeCandidateText(aiText);
-    if (!aiNormalized) return null;
-
-    let bestOption = null;
-    let bestScore = -1;
-
-    options.forEach(option => {
-      const labelNormalized = normalizeCandidateText(option.label);
-      const valueNormalized = normalizeCandidateText(option.value);
-      let score = -1;
-
-      if (aiNormalized === labelNormalized || (valueNormalized && aiNormalized === valueNormalized)) {
-        score = 100;
-      } else if (labelNormalized.includes(aiNormalized) || aiNormalized.includes(labelNormalized)) {
-        score = 80;
-      } else if (valueNormalized && (valueNormalized.includes(aiNormalized) || aiNormalized.includes(valueNormalized))) {
-        score = 75;
+    let parsed;
+    const text = rawText.trim();
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      const match = text.match(/\[[\s\S]*\]/);
+      if (match) {
+        try {
+          parsed = JSON.parse(match[0]);
+        } catch (nestedError) {
+          return { error: 'AI 返回内容无法解析为类目数组' };
+        }
       } else {
-        const uniqueChars = Array.from(new Set(aiNormalized.split('')));
-        score = uniqueChars.reduce((total, char) => total + (labelNormalized.includes(char) ? 1 : 0), 0);
+        parsed = text
+          .split(/[\n,，]/)
+          .map(item => item.replace(/["'\s]/g, '').trim())
+          .filter(Boolean);
       }
+    }
 
-      if (score > bestScore) {
-        bestScore = score;
-        bestOption = option;
-      }
+    if (!Array.isArray(parsed)) {
+      return { error: 'AI 返回内容不是类目数组' };
+    }
+
+    const validCmds = [];
+    parsed.forEach(item => {
+      const cmd = String(item == null ? '' : item).trim();
+      if (!cmd || validCmds.includes(cmd)) return;
+      if (getDisplayItemByCommand(cmd)) validCmds.push(cmd);
     });
 
-    return bestScore >= 2 ? bestOption : null;
+    if (validCmds.length === 0) {
+      return { error: 'AI 返回的类目均无效' };
+    }
+    return { value: validCmds.slice(0, 3) };
   }
 
   // === DeepSeek 通信核心 ===
   const deepseekCache = new Map();
+  const deepseekPendingRequests = new Map();
 
   function isOfficialDeepSeekApi(url) {
     return typeof url === 'string' && /^https:\/\/api\.deepseek\.com\//i.test(url);
@@ -410,7 +550,7 @@
     return { error: errMsg };
   }
 
-  function askDeepSeek(label, promptText) {
+  function askDeepSeek(label, promptText, systemPrompt) {
     return new Promise((resolve) => {
       if (!CONFIG.DEEPSEEK_API_KEY) return resolve(null);
       if (typeof GM_xmlhttpRequest === 'undefined') {
@@ -424,7 +564,7 @@
       const requestBody = {
         model: CONFIG.DEEPSEEK_API_MODEL || "deepseek-v4-flash",
         messages: [
-          { role: "system", content: getAiSystemPrompt() },
+          { role: "system", content: systemPrompt || getAiRecommendationSystemPrompt() },
           { role: "user", content: `字段名：${promptKey}` }
         ],
         temperature: 0.1,
@@ -434,7 +574,6 @@
         requestBody.thinking = { type: "disabled" };
       }
 
-      console.log(`[AutoMock AI] 发起请求: 字段名="${label}"`);
       GM_xmlhttpRequest({
         method: 'POST',
         url: requestUrl,
@@ -444,7 +583,6 @@
         },
         data: JSON.stringify(requestBody),
         onload: function(res) {
-          console.log(`[AutoMock AI] 收到响应: HTTP ${res.status}`, res.responseText);
           if (res.status !== 200) {
             console.error("[AutoMock AI] API Error:", res.status, res.responseText);
             let errMsg = `HTTP ${res.status}`;
@@ -461,12 +599,9 @@
              return resolve({ error: "服务器返回了空内容" });
           }
           try {
-            console.log("[AutoMock AI] 准备解析 JSON:", res.responseText);
             const data = JSON.parse(res.responseText);
-            console.log("[AutoMock AI] JSON 解析成功:", data);
             const extracted = extractDeepSeekResult(data);
             if (extracted.value) {
-              console.log("[AutoMock AI] 提取结果:", extracted.value);
               deepseekCache.set(promptKey, extracted.value);
               resolve(extracted.value);
             } else {
@@ -486,11 +621,196 @@
     });
   }
 
+  function getCachedAiRecommendationResult(promptKey) {
+    if (!promptKey || !deepseekCache.has(promptKey)) return null;
+    const cachedText = deepseekCache.get(promptKey);
+    if (!cachedText || (cachedText && cachedText.error)) return null;
+    const parsed = parseAiRecommendationResult(cachedText);
+    return parsed.error ? null : parsed.value;
+  }
+
+  function requestAiRecommendation(promptKey, labelText, systemPrompt) {
+    if (!promptKey || !CONFIG.DEEPSEEK_API_KEY || CONFIG.AI_ENABLE_CLASSIFICATION === false) return Promise.resolve([]);
+
+    const cachedResult = getCachedAiRecommendationResult(promptKey);
+    if (cachedResult) {
+      return Promise.resolve(cachedResult);
+    }
+
+    if (deepseekPendingRequests.has(promptKey)) {
+      return deepseekPendingRequests.get(promptKey);
+    }
+
+    const requestPromise = askDeepSeek(labelText, promptKey, systemPrompt)
+      .then((aiResult) => {
+        if (!aiResult || (aiResult && aiResult.error)) {
+          return [];
+        }
+
+        const parsed = parseAiRecommendationResult(aiResult);
+        if (parsed.error) {
+          return [];
+        }
+        return parsed.value;
+      })
+      .finally(() => {
+        deepseekPendingRequests.delete(promptKey);
+      });
+
+    deepseekPendingRequests.set(promptKey, requestPromise);
+    return requestPromise;
+  }
+
   // ==========================================
   // 3. 字段上下文与直达填入
   // ==========================================
   let spotlightTargetElement = null;
-  let currentAiRequestId = 0;
+  let latestInteractionTarget = null;
+  let spotlightPreloadTimer = null;
+  let latestPreloadPromptKey = '';
+  let latestPreloadTriggerType = '';
+
+  const FIELD_CONTAINER_SELECTORS = '.el-input, .el-textarea, .el-select, .el-date-editor, .el-cascader, .el-radio-group, .el-switch, .el-form-item';
+  const FIELD_INPUT_SELECTORS = [
+    '.el-select input.el-input__inner',
+    '.el-date-editor input.el-input__inner',
+    '.el-cascader .el-input__inner',
+    '.el-textarea__inner',
+    '.el-input__inner',
+    '.el-radio__original',
+    '.el-switch__input',
+    'textarea',
+    'input:not([type="hidden"])'
+  ];
+
+  function isFormFieldInputElement(target) {
+    return Boolean(target) && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+  }
+
+  function normalizeElement(target) {
+    if (!target) return null;
+    if (target.nodeType === 1) return target;
+    return target.parentElement || null;
+  }
+
+  function findFieldFromContainer(container) {
+    const element = normalizeElement(container);
+    if (!element) return null;
+    if (isFormFieldInputElement(element) && element.type !== 'hidden') return element;
+    if (typeof element.querySelector !== 'function') return null;
+
+    for (let i = 0; i < FIELD_INPUT_SELECTORS.length; i++) {
+      const field = element.querySelector(FIELD_INPUT_SELECTORS[i]);
+      if (isFormFieldInputElement(field) && field.type !== 'hidden') {
+        return field;
+      }
+    }
+    return null;
+  }
+
+  function resolveMockFieldElement(target) {
+    const element = normalizeElement(target);
+    if (!element) return null;
+    if (isFormFieldInputElement(element) && element.type !== 'hidden') return element;
+
+    const candidates = [];
+    const pushCandidate = (candidate) => {
+      const normalized = normalizeElement(candidate);
+      if (!normalized || candidates.includes(normalized)) return;
+      candidates.push(normalized);
+    };
+
+    pushCandidate(element);
+    if (typeof element.closest === 'function') {
+      pushCandidate(element.closest(FIELD_CONTAINER_SELECTORS));
+      pushCandidate(element.closest('.el-form-item'));
+      pushCandidate(element.closest('td, th'));
+    }
+
+    for (let i = 0; i < candidates.length; i++) {
+      const field = findFieldFromContainer(candidates[i]);
+      if (field) return field;
+    }
+    return null;
+  }
+
+  function rememberLatestInteraction(target) {
+    const element = normalizeElement(target);
+    if (!element) return;
+
+    const fieldElement = resolveMockFieldElement(element);
+    if (fieldElement) {
+      latestInteractionTarget = element;
+      spotlightTargetElement = fieldElement;
+      return;
+    }
+
+    if (typeof element.closest === 'function' && element.closest(FIELD_CONTAINER_SELECTORS)) {
+      latestInteractionTarget = element;
+    }
+  }
+
+  function getAiPreloadPromptKey(context) {
+    if (!context || !CONFIG.DEEPSEEK_API_KEY || CONFIG.AI_ENABLE_CLASSIFICATION === false || CONFIG.AI_ENABLE_PRELOAD === false || isLocalOnlyHookComponent(context.componentName)) return '';
+    return getAiRecommendationPrompt(context);
+  }
+
+  function scheduleAiRecommendationPreload(context, options = {}) {
+    const triggerType = options.triggerType === 'hover' ? 'hover' : 'active';
+    const promptKey = getAiPreloadPromptKey(context);
+    if (!promptKey) {
+      if (spotlightPreloadTimer) {
+        clearTimeout(spotlightPreloadTimer);
+        spotlightPreloadTimer = null;
+      }
+      latestPreloadPromptKey = '';
+      latestPreloadTriggerType = '';
+      return;
+    }
+
+    if (getCachedAiRecommendationResult(promptKey)) {
+      latestPreloadPromptKey = promptKey;
+      latestPreloadTriggerType = triggerType;
+      return;
+    }
+
+    if (deepseekPendingRequests.has(promptKey)) {
+      latestPreloadPromptKey = promptKey;
+      latestPreloadTriggerType = triggerType;
+      return;
+    }
+
+    const preloadDelay = triggerType === 'hover' ? 80 : 0;
+
+    if (latestPreloadPromptKey === promptKey && spotlightPreloadTimer) {
+      if (preloadDelay > 0 || latestPreloadTriggerType !== 'hover') {
+        return;
+      }
+    }
+
+    if (spotlightPreloadTimer) {
+      clearTimeout(spotlightPreloadTimer);
+      spotlightPreloadTimer = null;
+    }
+
+    latestPreloadPromptKey = promptKey;
+    latestPreloadTriggerType = triggerType;
+
+    const triggerPreloadRequest = () => {
+      spotlightPreloadTimer = null;
+      latestPreloadTriggerType = '';
+      requestAiRecommendation(promptKey, context.labelText, getAiRecommendationSystemPrompt()).catch(err => {
+        console.error('[AutoMock AI] 预加载推荐类目失败:', err);
+      });
+    };
+
+    if (preloadDelay <= 0) {
+      triggerPreloadRequest();
+      return;
+    }
+
+    spotlightPreloadTimer = setTimeout(triggerPreloadRequest, preloadDelay);
+  }
 
   function getVueInstance(input) {
     let vueInstance = null;
@@ -653,75 +973,223 @@
     return false;
   }
 
-  function applyAiResultToField(context, aiVal) {
-    const { inputEl, vueInstance, componentName, hookAction, supportsAiSuggestion, localHookName } = context;
+  let latestSpotlightRequestId = 0;
 
-    if (typeof aiVal === 'string' && aiVal.trim()) {
-      if (supportsAiSuggestion) {
-        const matchedOption = matchAiSuggestionToOption(aiVal, vueInstance, componentName);
-        if (matchedOption) {
-          return matchedOption.apply();
-        }
-        if (hookAction) {
-          console.warn(`[AutoMock AI] 未命中候选项，已改用${localHookName}:`, aiVal);
-          return hookAction();
-        }
-        console.warn('[AutoMock AI] 未命中候选项，未执行写入:', aiVal);
-        return false;
+  function buildRecommendationCardsFromCommands(commands, context) {
+    const cards = [];
+    const pushUniqueCard = (card) => {
+      if (!card || !card.cmd) return;
+      if (cards.some(existing => existing.cmd === card.cmd)) return;
+      cards.push(card);
+    };
+
+    if (Array.isArray(commands)) {
+      commands.forEach(cmd => {
+        const displayItem = getDisplayItemByCommand(cmd);
+        if (displayItem) pushUniqueCard(displayItem);
+      });
+    }
+
+    if (cards.length === 0 && context) {
+      if (context.hookAction) {
+        pushUniqueCard({ label: context.localHookName, cmd: '__hook_default' });
       }
 
-      fillElement(inputEl, aiVal);
-      return true;
+      predictMockTypes(context.labelText, 3).forEach(item => {
+        pushUniqueCard({ label: item.name, cmd: item.cmd });
+      });
     }
 
-    if (aiVal && aiVal.error) {
-      console.warn('[AutoMock AI] 返回结果不可直接填入:', aiVal.error);
-    }
-    return applyLocalFallback(context);
+    return cards.slice(0, 3);
   }
 
-  async function fillFieldDirectly(inputEl, options = {}) {
-    const { aiOnly = false } = options;
-    const context = getFieldContext(inputEl);
-    if (!context) return false;
-
-    spotlightTargetElement = inputEl;
-    if (CONFIG.DEEPSEEK_API_KEY && !isLocalOnlyHookComponent(context.componentName)) {
-      const requestId = ++currentAiRequestId;
-      const aiPromptText = buildAiPromptText(context.labelText, context.vueInstance, context.componentName);
-      const aiVal = await askDeepSeek(context.labelText, aiPromptText);
-      if (requestId !== currentAiRequestId) return false;
-      return applyAiResultToField(context, aiVal);
+  async function getAiRecommendedCommands(context) {
+    if (!context || !CONFIG.DEEPSEEK_API_KEY || CONFIG.AI_ENABLE_CLASSIFICATION === false || isLocalOnlyHookComponent(context.componentName)) {
+      return [];
     }
 
-    if (aiOnly) return false;
-    return applyLocalFallback(context);
+    const promptText = getAiRecommendationPrompt(context);
+    return requestAiRecommendation(promptText, context.labelText, getAiRecommendationSystemPrompt());
   }
 
-  function triggerFocusedFieldAi() {
-    if (!CONFIG.DEEPSEEK_API_KEY) return;
-    const target = spotlightTargetElement || document.activeElement;
-    if (!target || (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA')) return;
-    fillFieldDirectly(target, { aiOnly: false }).catch(err => {
-      console.error('[AutoMock AI] 快捷键直填失败:', err);
-    });
+  async function loadSpotlightRecommendations(container, context, requestId) {
+    if (!container || !context) return;
+    const loadingHint = container.querySelector('[data-role="recommend-loading"]');
+    if (loadingHint) loadingHint.innerText = '正在为当前字段匹配推荐类目...';
+
+    const aiCommands = await getAiRecommendedCommands(context);
+    if (requestId !== latestSpotlightRequestId) return;
+
+    const recommendCards = buildRecommendationCardsFromCommands(aiCommands, context);
+    renderRecommendationSection(container, recommendCards, !aiCommands.length);
   }
 
-  // 持续跟踪全局最后一个处于聚焦状态的输入框
-  document.addEventListener('focusin', (e) => {
-    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
-      spotlightTargetElement = e.target;
-      if (CONFIG.DEEPSEEK_API_KEY && !isAiManualMode()) {
-        const target = e.target;
-        setTimeout(() => {
-          if (spotlightTargetElement !== target) return;
-          fillFieldDirectly(target, { aiOnly: true }).catch(err => {
-            console.error('[AutoMock AI] 自动直填失败:', err);
-          });
-        }, 10);
-      }
+  function resolveSpotlightContext() {
+    const candidates = [];
+    const pushCandidate = (candidate) => {
+      const normalized = normalizeElement(candidate);
+      if (!normalized || candidates.includes(normalized)) return;
+      candidates.push(normalized);
+    };
+
+    pushCandidate(latestInteractionTarget);
+    pushCandidate(document.activeElement);
+    pushCandidate(spotlightTargetElement);
+
+    for (let i = 0; i < candidates.length; i++) {
+      const fieldElement = resolveMockFieldElement(candidates[i]);
+      if (!fieldElement) continue;
+      const context = getFieldContext(fieldElement);
+      if (!context) continue;
+      spotlightTargetElement = context.inputEl;
+      return context;
     }
+
+    const fallbackField = resolveMockFieldElement(latestInteractionTarget) || resolveMockFieldElement(document.activeElement) || resolveMockFieldElement(spotlightTargetElement);
+    if (fallbackField) spotlightTargetElement = fallbackField;
+    return null;
+  }
+
+  function getCachedSpotlightRecommendation(context) {
+    if (!context || !CONFIG.DEEPSEEK_API_KEY || CONFIG.AI_ENABLE_CLASSIFICATION === false || isLocalOnlyHookComponent(context.componentName)) {
+      return null;
+    }
+
+    const promptText = getAiRecommendationPrompt(context);
+    return getCachedAiRecommendationResult(promptText);
+  }
+
+  function renderSpotlightByContext(panel, context) {
+    latestSpotlightRequestId += 1;
+    const requestId = latestSpotlightRequestId;
+    if (!panel) return;
+
+    if (!context) {
+      renderRecommendationSection(panel, [], true, {
+        titleText: '✨ 智能推荐',
+        emptyText: `请先点击一个表单字段，再按 Alt+${(CONFIG.SHORTCUT_SPOTLIGHT || 'x').toUpperCase()} 或 ${getAiShortcutText()} 打开智能推荐。`,
+        hintText: '当前还没有识别到可推荐的目标字段。'
+      });
+      return;
+    }
+
+    const cachedAiCommands = getCachedSpotlightRecommendation(context);
+    if (cachedAiCommands) {
+      const cachedCards = buildRecommendationCardsFromCommands(cachedAiCommands, context);
+      renderRecommendationSection(panel, cachedCards, !cachedAiCommands.length);
+      return;
+    }
+
+    const fallbackCards = buildRecommendationCardsFromCommands([], context);
+    renderRecommendationSection(panel, fallbackCards, true);
+    if (CONFIG.AI_ENABLE_CLASSIFICATION !== false && CONFIG.DEEPSEEK_API_KEY && !isLocalOnlyHookComponent(context.componentName)) {
+      loadSpotlightRecommendations(panel, context, requestId).catch(err => {
+        console.error('[AutoMock AI] 刷新推荐类目失败:', err);
+      });
+    }
+  }
+
+  function ensureSpotlightVisible() {
+    let container = document.getElementById('mock-ext-spotlight');
+    if (!container || container.style.display === 'none') {
+      createSpotlightUI();
+      container = document.getElementById('mock-ext-spotlight');
+      if (container) container.style.display = 'flex';
+    }
+    return container;
+  }
+
+  function refreshSpotlightRecommendations() {
+    const context = resolveSpotlightContext();
+    const container = ensureSpotlightVisible();
+    const panel = container ? container.querySelector('div') : null;
+    renderSpotlightByContext(panel, context);
+  }
+
+  document.addEventListener('pointerover', (e) => {
+    rememberLatestInteraction(e.target);
+    const fieldElement = resolveMockFieldElement(e.target);
+    if (!fieldElement) return;
+    const context = getFieldContext(fieldElement);
+    if (!context) return;
+    scheduleAiRecommendationPreload(context, { triggerType: 'hover' });
   }, true);
+
+  ['pointerdown', 'mousedown', 'click', 'focusin'].forEach((eventName) => {
+    document.addEventListener(eventName, (e) => {
+      rememberLatestInteraction(e.target);
+      const fieldElement = resolveMockFieldElement(e.target);
+      if (!fieldElement) return;
+      const context = getFieldContext(fieldElement);
+      if (!context) return;
+      scheduleAiRecommendationPreload(context, { triggerType: 'active' });
+    }, true);
+  });
+
+  function renderRecommendationSection(panel, items, usedFallback, options = {}) {
+    if (!panel) return;
+    const oldSection = panel.querySelector('[data-role="recommend-section"]');
+    if (oldSection) oldSection.remove();
+
+    const section = document.createElement('div');
+    section.setAttribute('data-role', 'recommend-section');
+
+    const sectionTitle = document.createElement('h3');
+    sectionTitle.innerText = options.titleText || (usedFallback ? '✨ 智能推荐 (本地回退)' : '✨ 智能推荐 (AI 匹配)');
+    sectionTitle.style.cssText = 'font-size: 13px; color: #909399; margin: 0 0 10px 0; padding-bottom: 6px; border-bottom: 1px solid #ebeef5; font-weight: 500;';
+    section.appendChild(sectionTitle);
+
+    const grid = document.createElement('div');
+    grid.style.cssText = 'display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 6px;';
+
+    items.forEach(item => {
+      const btn = document.createElement('button');
+      btn.innerText = item.label;
+      btn.style.cssText = `
+        padding: 10px 0;
+        background: #f0f9eb;
+        border: 1px solid #e1f3d8;
+        border-radius: 6px;
+        color: #67c23a;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+        outline: none;
+      `;
+      btn.onmouseover = () => { btn.style.background = '#e1f3d8'; btn.style.color = '#67c23a'; btn.style.borderColor = '#c2e7b0'; };
+      btn.onmouseout = () => { btn.style.background = '#f0f9eb'; btn.style.color = '#67c23a'; btn.style.borderColor = '#e1f3d8'; };
+      btn.onclick = () => {
+        executeSpotlightCommand(item.cmd);
+        closeSpotlight();
+      };
+      grid.appendChild(btn);
+    });
+
+    if (items.length === 0) {
+      const empty = document.createElement('div');
+      empty.innerText = options.emptyText || '当前字段暂未匹配到推荐类目，可直接从下方手动选择。';
+      empty.style.cssText = 'font-size: 12px; color: #909399; padding: 8px 0 2px 0;';
+      section.appendChild(empty);
+    } else {
+      section.appendChild(grid);
+    }
+
+    const hint = document.createElement('div');
+    hint.innerText = options.hintText || (usedFallback ? '当前为本地规则回退推荐。' : `按 ${getAiShortcutText()} 可刷新当前字段的 AI 推荐类目。`);
+    hint.style.cssText = 'font-size: 12px; color: #b0b3b8; margin-bottom: 8px;';
+    section.appendChild(hint);
+
+    const loading = panel.querySelector('[data-role="recommend-loading"]');
+    if (loading) loading.remove();
+
+    const title = panel.querySelector('[data-role="spotlight-title"]');
+    if (title) {
+      title.insertAdjacentElement('afterend', section);
+    } else {
+      panel.prepend(section);
+    }
+  }
 
   function createSpotlightUI() {
     let container = document.getElementById('mock-ext-spotlight');
@@ -761,71 +1229,18 @@
     document.head.appendChild(style);
     
     const title = document.createElement('div');
+    title.setAttribute('data-role', 'spotlight-title');
     title.innerText = '⚡ 选择要填入的数据格式';
     title.style.cssText = 'font-size: 16px; color: #333; margin-bottom: 20px; font-weight: bold; user-select: none; text-align: center;';
     panel.appendChild(title);
 
-    let mockGroups = [
-      {
-        title: '👤 个人信息',
-        items: [
-          { label: '人名', cmd: 'name' },
-          { label: '英文名', cmd: 'englishName' },
-          { label: '身份证', cmd: 'idcard' },
-          { label: '年龄', cmd: 'age' },
-          { label: '手机号', cmd: 'phone' },
-          { label: '邮箱', cmd: 'email' }
-        ]
-      },
-      {
-        title: '🏢 企业与资产',
-        items: [
-          { label: '企业名称', cmd: 'company' },
-          { label: '信用代码', cmd: 'creditCode' },
-          { label: '职务头衔', cmd: 'title' },
-          { label: '车牌号', cmd: 'licensePlate' },
-          { label: '银行卡', cmd: 'bankCard' },
-          { label: '金额数值', cmd: 'amount' }
-        ]
-      },
-      {
-        title: '🌐 网络与位置',
-        items: [
-          { label: '详细地址', cmd: 'address' },
-          { label: '邮政编码', cmd: 'zipCode' },
-          { label: 'IP地址', cmd: 'ipv4' },
-          { label: 'MAC地址', cmd: 'mac' },
-          { label: '随机链接', cmd: 'url' },
-          { label: '强密码', cmd: 'password' }
-        ]
-      },
-      {
-        title: '📝 日期与文本',
-        items: [
-          { label: '日期', cmd: 'date' },
-          { label: '时间', cmd: 'time' },
-          { label: '随机数字', cmd: 'number' },
-          { label: '颜色值', cmd: 'color' },
-          { label: '长文本段落', cmd: 'text' }
-        ]
-      }
-    ];
+    const loadingHint = document.createElement('div');
+    loadingHint.setAttribute('data-role', 'recommend-loading');
+    loadingHint.innerText = '正在准备推荐区...';
+    loadingHint.style.cssText = 'font-size: 12px; color: #b0b3b8; margin: -8px 0 14px 0; text-align: center;';
+    panel.appendChild(loadingHint);
 
-    // --- 智能化匹配逻辑 ---
-    if (spotlightTargetElement) {
-      const vueInstance = getVueInstance(spotlightTargetElement);
-      const labelText = getLabelForInput(spotlightTargetElement, vueInstance);
-      const prediction = predictMockType(labelText);
-      if (prediction) {
-        mockGroups.unshift({
-          title: '✨ 智能推荐 (基于当前焦点)',
-          isRecommended: true,
-          items: [
-            { label: prediction.name, cmd: prediction.cmd }
-          ]
-        });
-      }
-    }
+    const mockGroups = getBuiltInMockGroups();
 
     mockGroups.forEach(group => {
       const sectionTitle = document.createElement('h3');
@@ -925,15 +1340,11 @@
       closeSpotlight();
       return;
     }
-    
-    if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
-      spotlightTargetElement = document.activeElement;
-    }
-    
-    // 强制每次重建DOM以实现智能推荐
-    createSpotlightUI();
-    container = document.getElementById('mock-ext-spotlight');
-    container.style.display = 'flex';
+
+    const context = resolveSpotlightContext();
+    container = ensureSpotlightVisible();
+    const panel = container ? container.querySelector('div') : null;
+    renderSpotlightByContext(panel, context);
   }
 
   function closeSpotlight() {
@@ -946,11 +1357,17 @@
 
   function executeSpotlightCommand(cmd) {
     if (!cmd) return;
-    if (!spotlightTargetElement || (spotlightTargetElement.tagName !== 'INPUT' && spotlightTargetElement.tagName !== 'TEXTAREA')) {
-      alert("Auto Mock: 请先将光标点击聚焦到需要插入的输入框内，再唤出控制台！");
+    const context = resolveSpotlightContext();
+    if (!context) {
+      alert(`Auto Mock: 请先点击可编辑的表单字段，再按 Alt+${(CONFIG.SHORTCUT_SPOTLIGHT || 'x').toUpperCase()} 或 ${getAiShortcutText()} 使用智能推荐。`);
       return;
     }
-    applyDirectCommandToInput(spotlightTargetElement, cmd);
+    spotlightTargetElement = context.inputEl;
+    if (cmd === '__hook_default') {
+      applyLocalFallback(context);
+      return;
+    }
+    applyDirectCommandToInput(context.inputEl, cmd);
   }
 
   function fillElement(inputEl, mockValue) {
@@ -994,17 +1411,24 @@
         if (event.data.config.shortcutSpotlight) CONFIG.SHORTCUT_SPOTLIGHT = event.data.config.shortcutSpotlight;
         if (event.data.config.shortcutFill) CONFIG.SHORTCUT_FILL_ALL = event.data.config.shortcutFill;
         if (event.data.config.shortcutAiTrigger) CONFIG.SHORTCUT_AI_TRIGGER = event.data.config.shortcutAiTrigger;
+        if (event.data.config.SHORTCUT_AI_TRIGGER) CONFIG.SHORTCUT_AI_TRIGGER = event.data.config.SHORTCUT_AI_TRIGGER;
         if (typeof event.data.config.aiManualTriggerMode === 'boolean') CONFIG.AI_MANUAL_TRIGGER_MODE = event.data.config.aiManualTriggerMode;
+        if (typeof event.data.config.AI_MANUAL_TRIGGER_MODE === 'boolean') CONFIG.AI_MANUAL_TRIGGER_MODE = event.data.config.AI_MANUAL_TRIGGER_MODE;
+        if (typeof event.data.config.aiEnableClassification === 'boolean') CONFIG.AI_ENABLE_CLASSIFICATION = event.data.config.aiEnableClassification;
+        if (typeof event.data.config.AI_ENABLE_CLASSIFICATION === 'boolean') CONFIG.AI_ENABLE_CLASSIFICATION = event.data.config.AI_ENABLE_CLASSIFICATION;
+        if (typeof event.data.config.aiEnablePreload === 'boolean') CONFIG.AI_ENABLE_PRELOAD = event.data.config.aiEnablePreload;
+        if (typeof event.data.config.AI_ENABLE_PRELOAD === 'boolean') CONFIG.AI_ENABLE_PRELOAD = event.data.config.AI_ENABLE_PRELOAD;
         if (typeof event.data.config.deepseekApiUrl === 'string') CONFIG.DEEPSEEK_API_URL = event.data.config.deepseekApiUrl;
+        if (typeof event.data.config.DEEPSEEK_API_URL === 'string') CONFIG.DEEPSEEK_API_URL = event.data.config.DEEPSEEK_API_URL;
         if (typeof event.data.config.deepseekApiModel === 'string') CONFIG.DEEPSEEK_API_MODEL = event.data.config.deepseekApiModel;
+        if (typeof event.data.config.DEEPSEEK_API_MODEL === 'string') CONFIG.DEEPSEEK_API_MODEL = event.data.config.DEEPSEEK_API_MODEL;
         if (typeof event.data.config.deepseekApiKey === 'string') CONFIG.DEEPSEEK_API_KEY = event.data.config.deepseekApiKey;
-        console.log("Auto Mock Configuration updated from extension options.");
+        if (typeof event.data.config.DEEPSEEK_API_KEY === 'string') CONFIG.DEEPSEEK_API_KEY = event.data.config.DEEPSEEK_API_KEY;
       }
     }
   }, false);
 
   async function fillElementUiForms() {
-    console.log("Starting Auto Mock Fill...");
     const inputs = Array.from(document.querySelectorAll('.el-input__inner, .el-textarea__inner'));
     let fillCount = 0;
     let skipCount = 0;
@@ -1036,7 +1460,6 @@
         return labelText.toLowerCase().includes(kw) || (vModelExpr && vModelExpr.toLowerCase().includes(kw));
       });
       if (isIgnored) {
-        console.log(`Auto Mock: 跳过字段 "${labelText}" (触发黑名单)`);
         skipCount++;
         continue;
       }
@@ -1060,7 +1483,6 @@
         }
       }
     }
-    console.log(`Auto Mock Fill completed. Filled: ${fillCount}, Skipped: ${skipCount}`);
   }
 
   // ==========================================
@@ -1074,8 +1496,10 @@
       e.preventDefault();
       fillElementUiForms();
     } else if (e.altKey && e.key.toLowerCase() === CONFIG.SHORTCUT_AI_TRIGGER.toLowerCase()) {
-      e.preventDefault();
-      triggerFocusedFieldAi();
+      if (CONFIG.AI_MANUAL_TRIGGER_MODE !== false && CONFIG.AI_ENABLE_CLASSIFICATION !== false) {
+        e.preventDefault();
+        refreshSpotlightRecommendations();
+      }
     }
   });
 
@@ -1110,7 +1534,7 @@
       </div>
 
       <div style="margin-bottom: 15px;">
-        <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">AI 单字段直填快捷键 (Alt + ?)</label>
+        <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">AI 推荐类目快捷键 (Alt + ?)</label>
         <input id="setting-ai-trigger" value="${CONFIG.SHORTCUT_AI_TRIGGER}" maxlength="1" style="width: 100%; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
       </div>
 
@@ -1129,7 +1553,15 @@
         <div class="help-text" style="font-size:12px;color:#909399;margin-bottom:6px;">只要是兼容 OpenAI 格式的 API 都能接入。默认填入 DeepSeek 配置。清空 Key 即可关闭此功能。</div>
         <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#606266; margin-bottom:10px;">
           <input type="checkbox" id="setting-ai-manual-mode" ${CONFIG.AI_MANUAL_TRIGGER_MODE !== false ? 'checked' : ''}/>
-          开启 AI 手动触发模式（选中字段后，按快捷键直接填入当前字段）
+          保留 AI 推荐快捷键（选中字段后，按快捷键刷新当前字段推荐类目）
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#606266; margin-bottom:10px;">
+          <input type="checkbox" id="setting-ai-enable-classification" ${CONFIG.AI_ENABLE_CLASSIFICATION !== false ? 'checked' : ''}/>
+          启用 AI 类目推荐；关闭后仅使用本地兜底推荐，不请求 AI，不消耗 Token
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#606266; margin-bottom:10px;">
+          <input type="checkbox" id="setting-ai-enable-preload" ${CONFIG.AI_ENABLE_PRELOAD !== false ? 'checked' : ''}/>
+          启用 AI 预加载分类；关闭后仅在打开弹窗时按需请求 AI
         </label>
         <div style="display: flex; align-items: center; margin-bottom: 8px;">
           <span style="width: 100px; font-size: 13px; color: #606266;">API URL:</span>
@@ -1161,6 +1593,8 @@
       const ignores = document.getElementById('setting-ignore').value.split(',').map(s => s.trim()).filter(Boolean);
       CONFIG.IGNORE_KEYWORDS = ignores.length ? ignores : DEFAULT_CONFIG.IGNORE_KEYWORDS;
       CONFIG.AI_MANUAL_TRIGGER_MODE = document.getElementById('setting-ai-manual-mode').checked;
+      CONFIG.AI_ENABLE_CLASSIFICATION = document.getElementById('setting-ai-enable-classification').checked;
+      CONFIG.AI_ENABLE_PRELOAD = document.getElementById('setting-ai-enable-preload').checked;
       
       const dictText = document.getElementById('setting-dicts').value.trim();
       let parsedDicts = [];
