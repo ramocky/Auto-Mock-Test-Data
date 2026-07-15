@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
+// @version      2.0.0
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
@@ -30,6 +30,16 @@
     AI_ENABLE_PRELOAD: false,
     IGNORE_KEYWORDS: ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'],
     CUSTOM_DICTS: [],
+    DATA_PROFILE: 'general',
+    RANDOM_SEED: '',
+    NUMBER_FILL_STRATEGY: 'normal',
+    FILL_VALIDATION_MODE: 'normal',
+    VALIDATE_AFTER_FILL: true,
+    SITE_RULES: [],
+    REMOTE_OPTION_RETRY_COUNT: 4,
+    REMOTE_OPTION_RETRY_DELAY_MS: 250,
+    DYNAMIC_FILL_WINDOW_MS: 8000,
+    DYNAMIC_FILL_MAX_DIALOG_STEPS: 3,
     DEEPSEEK_API_URL: 'https://api.deepseek.com/v1/chat/completions',
     DEEPSEEK_API_MODEL: 'deepseek-v4-flash',
     DEEPSEEK_API_KEY: ''
@@ -37,6 +47,18 @@
 
   let CONFIG = (typeof GM_getValue !== 'undefined') ? GM_getValue('auto_mock_config', DEFAULT_CONFIG) : DEFAULT_CONFIG;
   CONFIG = { ...DEFAULT_CONFIG, ...(CONFIG || {}) };
+  let lastFillOperation = null;
+
+  const DATA_PROFILES = {
+    general: { label: '通用后台数据', code: 'GEN' },
+    employee: { label: '员工档案数据', code: 'EMP' },
+    enterprise: { label: '企业入驻数据', code: 'BIZ' },
+    order: { label: '订单业务数据', code: 'ORD' }
+  };
+  const STICKY_MOCK_COMMANDS = new Set([
+    'name', 'englishName', 'nickname', 'gender', 'phone', 'email', 'idcard', 'bankCard', 'password',
+    'company', 'department', 'accountName', 'jobNumber', 'orderNo', 'address', 'city', 'zipCode', 'creditCode', 'licensePlate'
+  ]);
 
   // ==========================================
   // 1. 高阶内置 Mock 数据工厂 (Mock Engine)
@@ -225,6 +247,353 @@
     }
   };
 
+  function hashSeed(seedText) {
+    let hash = 2166136261;
+    for (let i = 0; i < seedText.length; i++) {
+      hash ^= seedText.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0 || 1;
+  }
+
+  function createSeededRandom(seedText) {
+    let state = hashSeed(seedText);
+    return () => {
+      state += 0x6D2B79F5;
+      let value = state;
+      value = Math.imul(value ^ (value >>> 15), value | 1);
+      value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+      return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function getSessionRandom(session) {
+    return session && typeof session.random === 'function' ? session.random : Math.random;
+  }
+
+  function pickSessionValue(values, session) {
+    if (!Array.isArray(values) || values.length === 0) return undefined;
+    return values[Math.floor(getSessionRandom(session)() * values.length)];
+  }
+
+  function createMockSession() {
+    const seed = String(CONFIG.RANDOM_SEED || '').trim();
+    const profileKey = DATA_PROFILES[CONFIG.DATA_PROFILE] ? CONFIG.DATA_PROFILE : 'general';
+    const random = seed ? createSeededRandom(seed) : Math.random;
+    const baseDate = seed
+      ? new Date(Date.UTC(2024, 0, 1) + Math.floor(random() * 63072000000))
+      : new Date();
+    return {
+      values: new Map(),
+      commandValues: new Map(),
+      profileKey,
+      profile: DATA_PROFILES[profileKey],
+      seed,
+      random,
+      baseDate,
+      boundaryIndex: 0,
+      handledFieldElements: new WeakSet(),
+      handledDialogRoots: new WeakSet(),
+      dialogStep: 0,
+      dynamicFillInProgress: false
+    };
+  }
+
+  function cloneSnapshotValue(value) {
+    if (Array.isArray(value)) return value.slice();
+    if (value instanceof Date) return new Date(value.getTime());
+    return value;
+  }
+
+  function readVueFieldValue(vueInstance) {
+    if (!vueInstance) return { exists: false };
+    const candidates = [
+      vueInstance.modelValue,
+      vueInstance.value,
+      vueInstance.$props && vueInstance.$props.modelValue,
+      vueInstance.$props && vueInstance.$props.value
+    ];
+    for (let i = 0; i < candidates.length; i++) {
+      if (candidates[i] !== undefined) return { exists: true, value: cloneSnapshotValue(candidates[i]) };
+    }
+    return { exists: false };
+  }
+
+  function captureFieldSnapshot(inputEl) {
+    if (!inputEl || !inputEl.isConnected) return null;
+    const vueInstance = getVueInstance(inputEl);
+    const snapshot = {
+      inputEl,
+      label: getLabelForInput(inputEl, vueInstance) || '未命名字段',
+      kind: getFieldKind(inputEl),
+      vueValue: readVueFieldValue(vueInstance)
+    };
+    if (inputEl.isContentEditable) snapshot.content = inputEl.textContent || '';
+    else if (inputEl.tagName === 'SELECT' && inputEl.multiple) snapshot.selectedValues = Array.from(inputEl.selectedOptions || []).map(option => option.value);
+    else if (inputEl.type === 'radio' && inputEl.name) {
+      snapshot.radioStates = Array.from(document.getElementsByName(inputEl.name))
+        .filter(input => input.type === 'radio')
+        .map(input => ({ input, checked: input.checked }));
+    } else if (inputEl.type === 'checkbox') snapshot.checked = inputEl.checked;
+    else snapshot.value = inputEl.value;
+    return snapshot;
+  }
+
+  function restoreFieldSnapshot(snapshot) {
+    if (!snapshot || !snapshot.inputEl || !snapshot.inputEl.isConnected) return false;
+    const inputEl = snapshot.inputEl;
+    const vueInstance = getVueInstance(inputEl);
+    if (snapshot.vueValue && snapshot.vueValue.exists && emitComponentValue(vueInstance, snapshot.vueValue.value)) return true;
+    if (inputEl.isContentEditable) {
+      inputEl.textContent = snapshot.content || '';
+      dispatchFieldEvents(inputEl);
+      return true;
+    }
+    if (Array.isArray(snapshot.selectedValues)) {
+      Array.from(inputEl.options || []).forEach(option => setNativeProperty(option, 'selected', snapshot.selectedValues.includes(option.value)));
+      dispatchFieldEvents(inputEl);
+      return true;
+    }
+    if (Array.isArray(snapshot.radioStates)) {
+      snapshot.radioStates.forEach(item => {
+        if (item.input && item.input.isConnected) setNativeProperty(item.input, 'checked', item.checked);
+      });
+      dispatchFieldEvents(inputEl);
+      return true;
+    }
+    if (typeof snapshot.checked === 'boolean') {
+      setNativeProperty(inputEl, 'checked', snapshot.checked);
+      dispatchFieldEvents(inputEl);
+      return true;
+    }
+    if (!setNativeProperty(inputEl, 'value', snapshot.value == null ? '' : snapshot.value)) return false;
+    dispatchFieldEvents(inputEl);
+    return true;
+  }
+
+  function createFillOperation(source) {
+    return { source, createdAt: Date.now(), snapshots: [], filled: 0, skipped: 0, failed: 0 };
+  }
+
+  function recordOperationSnapshot(operation, snapshot, outcome) {
+    if (!operation || !snapshot || !outcome) return;
+    if (outcome.status === 'filled') {
+      if (operation.snapshots.length < 500) operation.snapshots.push(snapshot);
+      operation.filled++;
+    } else operation.skipped++;
+  }
+
+  function withSessionRandom(session, callback) {
+    if (!session || !session.seed) return callback();
+    const originalRandom = Math.random;
+    try {
+      // MockFactory is synchronous, so a temporary source keeps existing generators deterministic.
+      Math.random = session.random;
+    } catch (error) {
+      return callback();
+    }
+    try {
+      return callback();
+    } finally {
+      try { Math.random = originalRandom; } catch (error) {}
+    }
+  }
+
+  function getProfileSerial(session) {
+    if (session.profileSerial) return session.profileSerial;
+    session.profileSerial = String(Math.floor(getSessionRandom(session)() * 900000) + 100000);
+    return session.profileSerial;
+  }
+
+  function getProfileCity(session) {
+    if (session.profileCity) return session.profileCity;
+    session.profileCity = pickSessionValue(['北京', '上海', '深圳', '杭州', '厦门'], session);
+    return session.profileCity;
+  }
+
+  function buildProfileMockValue(command, session) {
+    const profileKey = session && session.profileKey ? session.profileKey : 'general';
+    if (profileKey === 'general') return undefined;
+
+    const serial = getProfileSerial(session);
+    const city = getProfileCity(session);
+    if (command === 'city') return `${city}市`;
+    if (profileKey === 'employee') {
+      const values = {
+        company: `${city}测试科技有限公司`,
+        department: pickSessionValue(['研发部', '产品部', '运营部', '市场部'], session),
+        title: pickSessionValue(['测试工程师', '产品专员', '运营专员'], session),
+        accountName: `employee_${serial}`,
+        jobNumber: `EMP${serial}`,
+        email: `employee_${serial}@test.example.com`,
+        text: `员工档案测试数据，编号 EMP${serial}，用于验证录入、审核和查询流程。`
+      };
+      return values[command];
+    }
+    if (profileKey === 'enterprise') {
+      const values = {
+        company: `${city}星航测试科技有限公司`,
+        accountName: `biz_${serial}`,
+        email: `contact_${serial}@test.example.com`,
+        address: `${city}市高新区测试大道${serial.slice(-3)}号`,
+        text: `企业入驻测试资料，统一编号 BIZ${serial}，用于验证资质、联系人和开户地址字段。`
+      };
+      return values[command];
+    }
+    if (profileKey === 'order') {
+      const values = {
+        orderNo: `ORD${serial}${serial.slice(-3)}`,
+        accountName: `buyer_${serial}`,
+        email: `buyer_${serial}@test.example.com`,
+        address: `${city}市测试路${serial.slice(-3)}号`,
+        amount: (Number(serial.slice(-4)) / 10).toFixed(2),
+        text: `订单测试备注，订单编号 ORD${serial}${serial.slice(-3)}，用于验证下单和履约流程。`
+      };
+      return values[command];
+    }
+    return undefined;
+  }
+
+  function buildSessionTemporalValue(command, session) {
+    if (!session || !session.seed || !session.baseDate) return undefined;
+    const date = new Date(session.baseDate);
+    const pad = value => String(value).padStart(2, '0');
+    if (command === 'date') return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    if (command === 'time') return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    if (command === 'dateTime') return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    if (command === 'orderNo') {
+      const stamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+      return `ORD${stamp}${Math.floor(getSessionRandom(session)() * 900 + 100)}`;
+    }
+    return undefined;
+  }
+
+  function generateMockValue(command, session) {
+    if (!command || !MockFactory[command]) return withSessionRandom(session, () => MockFactory.randomString());
+    if (session && STICKY_MOCK_COMMANDS.has(command) && session.commandValues.has(command)) {
+      return session.commandValues.get(command);
+    }
+
+    const profileValue = buildProfileMockValue(command, session);
+    const temporalValue = buildSessionTemporalValue(command, session);
+    const value = profileValue !== undefined
+      ? profileValue
+      : temporalValue !== undefined
+        ? temporalValue
+        : withSessionRandom(session, () => MockFactory[command]());
+    if (session && STICKY_MOCK_COMMANDS.has(command)) session.commandValues.set(command, value);
+    return value;
+  }
+
+  function normalizeStringList(value) {
+    const source = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
+    return source.map(item => String(item || '').trim()).filter(Boolean).slice(0, 100);
+  }
+
+  function normalizeSiteRule(rule) {
+    if (!rule || typeof rule !== 'object') return null;
+    const hosts = normalizeStringList(rule.hosts || rule.host);
+    if (!hosts.length) return null;
+    const fieldAliases = {};
+    if (rule.fieldAliases && typeof rule.fieldAliases === 'object' && !Array.isArray(rule.fieldAliases)) {
+      Object.entries(rule.fieldAliases).slice(0, 100).forEach(([pattern, label]) => {
+        const normalizedPattern = String(pattern || '').trim();
+        const normalizedLabel = String(label || '').trim();
+        if (!normalizedPattern || !normalizedLabel) return;
+        try {
+          new RegExp(normalizedPattern, 'i');
+          fieldAliases[normalizedPattern] = normalizedLabel;
+        } catch (error) {}
+      });
+    }
+    return {
+      name: String(rule.name || hosts[0]).trim().slice(0, 80),
+      hosts: hosts.map(host => host.toLowerCase()),
+      fieldAliases,
+      ignoreKeywords: normalizeStringList(rule.ignoreKeywords),
+      optionSkipKeywords: normalizeStringList(rule.optionSkipKeywords),
+      inputSelectors: normalizeStringList(rule.inputSelectors),
+      dialogSelectors: normalizeStringList(rule.dialogSelectors)
+    };
+  }
+
+  function normalizeSiteRules(rules) {
+    if (!Array.isArray(rules)) return [];
+    return rules.map(normalizeSiteRule).filter(Boolean).slice(0, 50);
+  }
+
+  function parseSiteRulesText(text) {
+    const parsed = JSON.parse(String(text || '[]'));
+    if (!Array.isArray(parsed)) throw new Error('站点规则必须是 JSON 数组');
+    return normalizeSiteRules(parsed);
+  }
+
+  function isHostMatched(host, pattern) {
+    const normalizedHost = String(host || '').toLowerCase();
+    const normalizedPattern = String(pattern || '').toLowerCase().trim();
+    if (!normalizedHost || !normalizedPattern) return false;
+    if (normalizedPattern.startsWith('*.')) {
+      const suffix = normalizedPattern.slice(2);
+      return normalizedHost === suffix || normalizedHost.endsWith(`.${suffix}`);
+    }
+    return normalizedHost === normalizedPattern;
+  }
+
+  function getActiveSiteRule() {
+    const host = typeof window !== 'undefined' && window.location ? window.location.hostname : '';
+    const rules = normalizeSiteRules(CONFIG.SITE_RULES);
+    return rules.find(rule => rule.hosts.some(pattern => isHostMatched(host, pattern))) || null;
+  }
+
+  function getRuleStringList(key) {
+    const rule = getActiveSiteRule();
+    return rule && Array.isArray(rule[key]) ? rule[key] : [];
+  }
+
+  function getEffectiveInputSelectors() {
+    return [...FIELD_INPUT_SELECTORS, ...getRuleStringList('inputSelectors')];
+  }
+
+  function getEffectiveDialogSelectors() {
+    return [...ACTIVE_DIALOG_SELECTORS, ...getRuleStringList('dialogSelectors')];
+  }
+
+  function queryAllBySelectors(root, selectors) {
+    const queryRoot = root && typeof root.querySelectorAll === 'function' ? root : document;
+    const seen = new Set();
+    const elements = [];
+    selectors.forEach(selector => {
+      try {
+        queryRoot.querySelectorAll(selector).forEach(element => {
+          if (seen.has(element)) return;
+          seen.add(element);
+          elements.push(element);
+        });
+      } catch (error) {}
+    });
+    return elements;
+  }
+
+  function getEffectiveIgnoreKeywords() {
+    return [...(CONFIG.IGNORE_KEYWORDS || DEFAULT_CONFIG.IGNORE_KEYWORDS), ...getRuleStringList('ignoreKeywords')];
+  }
+
+  function getEffectiveOptionSkipKeywords() {
+    return [...SELECT_SKIP_KEYWORDS, ...getRuleStringList('optionSkipKeywords')];
+  }
+
+  function applySiteFieldAlias(labelText) {
+    const rule = getActiveSiteRule();
+    if (!rule || !rule.fieldAliases) return labelText;
+    const label = String(labelText || '').trim();
+    for (const [pattern, alias] of Object.entries(rule.fieldAliases)) {
+      try {
+        if (new RegExp(pattern, 'i').test(label)) return alias;
+      } catch (error) {}
+    }
+    return label;
+  }
+
   const BUILTIN_MOCK_GROUPS = [
     {
       title: '👤 个人信息',
@@ -356,61 +725,49 @@
 
   const predictMockType = (label) => predictMockTypes(label, 1)[0] || null;
 
-  const resolveMockType = (label) => {
+  const resolveMockType = (label, session) => {
     const prediction = predictMockType(label);
     if (prediction && prediction.cmd) {
       if (prediction.cmd.startsWith('__custom_')) {
         const idx = parseInt(prediction.cmd.replace('__custom_', ''), 10);
         const dict = CONFIG.CUSTOM_DICTS[idx];
-        if (dict && dict.values && dict.values.length > 0) return dict.values[Math.floor(Math.random() * dict.values.length)];
+        if (dict && dict.values && dict.values.length > 0) return pickSessionValue(dict.values, session);
       } else if (MockFactory[prediction.cmd]) {
-        return MockFactory[prediction.cmd]();
+        return generateMockValue(prediction.cmd, session);
       }
     }
-    return MockFactory.randomString();
+    return generateMockValue('randomString', session);
   };
 
   // ==========================================
   // 3. 业务组件自定义挂载钩子 (Custom Component Hooks)
   // ==========================================
   const CustomHooks = {
-    ElSelect: (vueInstance) => {
+    ElSelect: (vueInstance, labelText, session) => {
       if (vueInstance.options && vueInstance.options.length > 0) {
         const validOptions = vueInstance.options.filter(opt => !opt.disabled);
         if (validOptions.length > 0) {
-          const randomOpt = validOptions[Math.floor(Math.random() * validOptions.length)];
-          vueInstance.$emit('input', randomOpt.value);
-          vueInstance.$emit('change', randomOpt.value);
-          return true;
+          const randomOpt = pickSessionValue(validOptions, session);
+          return emitComponentValue(vueInstance, randomOpt.value);
         }
       }
       return false;
     },
-    ElDatePicker: (vueInstance) => {
-      const now = new Date();
-      vueInstance.$emit('input', now);
-      vueInstance.$emit('change', now);
-      return true;
+    ElDatePicker: (vueInstance, labelText, session) => {
+      return emitComponentValue(vueInstance, buildDatePickerValue(vueInstance, labelText, session));
     },
-    ElTimePicker: (vueInstance) => {
-      const now = new Date();
-      vueInstance.$emit('input', now);
-      vueInstance.$emit('change', now);
-      return true;
+    ElTimePicker: (vueInstance, labelText, session) => {
+      return emitComponentValue(vueInstance, buildDatePickerValue(vueInstance, labelText, session));
     },
     ElSwitch: (vueInstance) => {
-      vueInstance.$emit('input', true);
-      vueInstance.$emit('change', true);
-      return true;
+      return emitComponentValue(vueInstance, true);
     },
-    ElRadioGroup: (vueInstance) => {
+    ElRadioGroup: (vueInstance, labelText, session) => {
       if (vueInstance.$children) {
         const children = vueInstance.$children.filter(c => c.$options.name === 'ElRadio' && !c.disabled);
         if (children.length > 0) {
-          const randomOpt = children[Math.floor(Math.random() * children.length)];
-          vueInstance.$emit('input', randomOpt.label);
-          vueInstance.$emit('change', randomOpt.label);
-          return true;
+          const randomOpt = pickSessionValue(children, session);
+          return emitComponentValue(vueInstance, randomOpt.label);
         }
       }
       return false;
@@ -439,7 +796,7 @@
 
   function createHookFillAction(vueInstance, componentName, labelText) {
     if (!CustomHooks[componentName]) return null;
-    return () => CustomHooks[componentName](vueInstance, labelText);
+    return (session) => CustomHooks[componentName](vueInstance, labelText, session);
   }
 
   function normalizeCandidateText(value) {
@@ -459,11 +816,7 @@
         .map(opt => ({
           label: String(opt.currentLabel || opt.label || opt.value || '').trim(),
           value: opt.value,
-          apply: () => {
-            vueInstance.$emit('input', opt.value);
-            vueInstance.$emit('change', opt.value);
-            return true;
-          }
+          apply: () => emitComponentValue(vueInstance, opt.value)
         }))
         .filter(opt => opt.label);
     }
@@ -474,11 +827,7 @@
         .map(child => ({
           label: String(child.label == null ? '' : child.label).trim(),
           value: child.label,
-          apply: () => {
-            vueInstance.$emit('input', child.label);
-            vueInstance.$emit('change', child.label);
-            return true;
-          }
+          apply: () => emitComponentValue(vueInstance, child.label)
         }))
         .filter(opt => opt.label);
     }
@@ -747,18 +1096,39 @@
   let spotlightPreloadTimer = null;
   let latestPreloadPromptKey = '';
   let latestPreloadTriggerType = '';
+  let deferredDialogObserver = null;
+  let deferredDialogTimer = null;
+  let deferredDialogDebounce = null;
 
-  const FIELD_CONTAINER_SELECTORS = '.el-input, .el-textarea, .el-select, .el-date-editor, .el-cascader, .el-radio-group, .el-switch, .el-form-item';
+  const FIELD_CONTAINER_SELECTORS = [
+    '.el-input', '.el-textarea', '.el-select', '.el-date-editor', '.el-cascader', '.el-radio-group', '.el-checkbox-group', '.el-switch', '.el-form-item',
+    '.el-select-v2', '.el-tree-select',
+    '.ant-input', '.ant-select', '.ant-picker', '.ant-cascader', '.ant-radio-group', '.ant-checkbox-group', '.ant-switch', '.ant-form-item',
+    '[role="combobox"]', '[role="listbox"]', '[contenteditable="true"]', 'select', 'input', 'textarea'
+  ].join(', ');
   const FIELD_INPUT_SELECTORS = [
     '.el-select input.el-input__inner',
     '.el-date-editor input.el-input__inner',
     '.el-cascader .el-input__inner',
+    '.el-select-v2 input',
+    '.el-tree-select input',
+    '.ant-select input',
+    '.ant-picker input',
+    '.ant-cascader input',
     '.el-textarea__inner',
     '.el-input__inner',
     '.el-radio__original',
     '.el-switch__input',
+    'select:not([disabled])',
+    '[contenteditable="true"]',
+    '.ql-editor[contenteditable="true"]',
+    '.ProseMirror[contenteditable="true"]',
+    '.tiptap[contenteditable="true"]',
+    '[role="textbox"][contenteditable="true"]',
+    'input[type="checkbox"]:not([disabled])',
+    'input[type="radio"]:not([disabled])',
     'textarea',
-    'input:not([type="hidden"]):not([type="file"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="image"]):not([type="checkbox"]):not([type="radio"])'
+    'input:not([type="hidden"]):not([type="file"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="image"])'
   ];
   const FIELD_INPUT_SELECTOR_TEXT = FIELD_INPUT_SELECTORS.join(', ');
   const ACTIVE_DIALOG_SELECTORS = [
@@ -766,9 +1136,15 @@
     '.el-drawer__wrapper',
     '.el-message-box__wrapper',
     '.el-overlay-dialog',
-    '[role="dialog"]'
+    '.ant-modal-root',
+    '.ant-drawer',
+    '.ant-popover',
+    '.ant-dropdown',
+    '[role="dialog"]',
+    '[aria-modal="true"]'
   ];
   const AUTO_MOCK_UI_SELECTOR = '#mock-ext-spotlight, #mock-ext-settings';
+  const SELECT_SKIP_KEYWORDS = ['全部', '全选', '请选择', '不限', '无数据', '暂无数据', '加载中'];
 
   function isElementVisible(element) {
     if (!element || !element.isConnected || typeof element.getClientRects !== 'function') return false;
@@ -791,8 +1167,8 @@
   }
 
   function getActiveDialogRoot() {
-    const candidates = Array.from(document.querySelectorAll(ACTIVE_DIALOG_SELECTORS.join(', ')))
-      .filter(root => isElementVisible(root) && root.querySelector(FIELD_INPUT_SELECTOR_TEXT));
+    const candidates = queryAllBySelectors(document, getEffectiveDialogSelectors())
+      .filter(root => isElementVisible(root) && queryAllBySelectors(root, getEffectiveInputSelectors()).length > 0);
 
     return candidates.reduce((activeRoot, candidate) => {
       if (!activeRoot) return candidate;
@@ -807,6 +1183,70 @@
     }, null);
   }
 
+  function stopDeferredDialogFill() {
+    if (deferredDialogObserver) deferredDialogObserver.disconnect();
+    if (deferredDialogTimer) clearTimeout(deferredDialogTimer);
+    if (deferredDialogDebounce) clearTimeout(deferredDialogDebounce);
+    deferredDialogObserver = null;
+    deferredDialogTimer = null;
+    deferredDialogDebounce = null;
+  }
+
+  function startDeferredDialogFill(session) {
+    stopDeferredDialogFill();
+    const observeRoot = document.body || document.documentElement;
+    if (!observeRoot || typeof MutationObserver === 'undefined') return;
+
+    const scheduleDynamicFields = (delay = 120) => {
+      if (!deferredDialogObserver) return;
+      if (deferredDialogDebounce) clearTimeout(deferredDialogDebounce);
+      deferredDialogDebounce = setTimeout(processDynamicFields, delay);
+    };
+
+    const fillAndContinue = (options, errorMessage) => {
+      fillElementUiForms(options)
+        .then(result => {
+          if (result.total > 0) scheduleDynamicFields(0);
+        })
+        .catch(error => console.warn(errorMessage, error));
+    };
+
+    const processDynamicFields = () => {
+      deferredDialogDebounce = null;
+      if (session.dynamicFillInProgress) return;
+      const dialogRoot = getActiveDialogRoot();
+      const maxDialogSteps = getBoundedConfigNumber(CONFIG.DYNAMIC_FILL_MAX_DIALOG_STEPS, 3, 1, 10);
+
+      if (dialogRoot && !session.handledDialogRoots.has(dialogRoot)) {
+        if (session.dialogStep >= maxDialogSteps) return;
+        session.handledDialogRoots.add(dialogRoot);
+        session.dialogStep++;
+        fillAndContinue(
+          { root: dialogRoot, watchNextDialog: false, session, silent: false },
+          '[AutoMock] 后续弹窗填充失败:'
+        );
+        return;
+      }
+
+      const dynamicRoot = dialogRoot || document;
+      fillAndContinue(
+        { root: dynamicRoot, watchNextDialog: false, session, silent: true },
+        '[AutoMock] 动态字段填充失败:'
+      );
+    };
+
+    deferredDialogObserver = new MutationObserver(() => scheduleDynamicFields());
+    deferredDialogObserver.observe(observeRoot, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'aria-hidden']
+    });
+    scheduleDynamicFields(0);
+    const windowMs = getBoundedConfigNumber(CONFIG.DYNAMIC_FILL_WINDOW_MS, 8000, 1000, 60000);
+    deferredDialogTimer = setTimeout(stopDeferredDialogFill, windowMs);
+  }
+
   function isFieldVisible(input) {
     if (isElementVisible(input)) return true;
     const componentRoot = input.closest(FIELD_CONTAINER_SELECTORS);
@@ -816,7 +1256,7 @@
   function collectFillableInputs(root) {
     const queryRoot = root && typeof root.querySelectorAll === 'function' ? root : document;
     const seen = new Set();
-    return Array.from(queryRoot.querySelectorAll(FIELD_INPUT_SELECTOR_TEXT)).filter(input => {
+    return queryAllBySelectors(queryRoot, getEffectiveInputSelectors()).filter(input => {
       if (seen.has(input)) return false;
       seen.add(input);
       if (input.closest(AUTO_MOCK_UI_SELECTOR)) return false;
@@ -824,8 +1264,13 @@
     });
   }
 
-  function isFormFieldInputElement(target) {
-    return Boolean(target) && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+  function isFormFieldElement(target) {
+    return Boolean(target) && (
+      target.tagName === 'INPUT' ||
+      target.tagName === 'TEXTAREA' ||
+      target.tagName === 'SELECT' ||
+      target.isContentEditable
+    );
   }
 
   function normalizeElement(target) {
@@ -837,14 +1282,12 @@
   function findFieldFromContainer(container) {
     const element = normalizeElement(container);
     if (!element) return null;
-    if (isFormFieldInputElement(element) && element.type !== 'hidden') return element;
+    if (isFormFieldElement(element) && element.type !== 'hidden') return element;
     if (typeof element.querySelector !== 'function') return null;
 
-    for (let i = 0; i < FIELD_INPUT_SELECTORS.length; i++) {
-      const field = element.querySelector(FIELD_INPUT_SELECTORS[i]);
-      if (isFormFieldInputElement(field) && field.type !== 'hidden') {
-        return field;
-      }
+    const fields = queryAllBySelectors(element, getEffectiveInputSelectors());
+    for (let i = 0; i < fields.length; i++) {
+      if (isFormFieldElement(fields[i]) && fields[i].type !== 'hidden') return fields[i];
     }
     return null;
   }
@@ -852,7 +1295,7 @@
   function resolveMockFieldElement(target) {
     const element = normalizeElement(target);
     if (!element) return null;
-    if (isFormFieldInputElement(element) && element.type !== 'hidden') return element;
+    if (isFormFieldElement(element) && element.type !== 'hidden') return element;
 
     const candidates = [];
     const pushCandidate = (candidate) => {
@@ -873,6 +1316,40 @@
       if (field) return field;
     }
     return null;
+  }
+
+  function getFieldKind(input) {
+    if (!input) return 'text';
+    if (input.isContentEditable) return 'contenteditable';
+    if (input.tagName === 'SELECT') return input.multiple ? 'native-multi-select' : 'native-select';
+    if (input.type === 'checkbox') return 'checkbox';
+    if (input.type === 'radio') return 'radio';
+    if (input.closest('.el-cascader, .ant-cascader, .el-tree-select')) return 'cascader';
+    if (input.closest('.el-select, .el-select-v2, .ant-select, [role="combobox"]')) return 'semantic-select';
+    if (input.closest('.el-date-editor, .ant-picker')) return 'date-picker';
+    return 'text';
+  }
+
+  function getFieldIdentity(input) {
+    const kind = getFieldKind(input);
+    if (kind === 'radio' && input.name) return `radio:${input.name}`;
+    if (kind === 'semantic-select' || kind === 'cascader' || kind === 'date-picker') {
+      const wrapper = input.closest('.el-select, .el-select-v2, .el-cascader, .el-tree-select, .el-date-editor, .ant-select, .ant-cascader, .ant-picker, [role="combobox"]');
+      if (wrapper) return wrapper;
+    }
+    return input;
+  }
+
+  function collectFillableFields(root) {
+    const seen = new Set();
+    return collectFillableInputs(root)
+      .filter(input => {
+        const identity = getFieldIdentity(input);
+        if (seen.has(identity)) return false;
+        seen.add(identity);
+        return true;
+      })
+      .map(input => ({ inputEl: input, kind: getFieldKind(input) }));
   }
 
   function rememberLatestInteraction(target) {
@@ -953,20 +1430,88 @@
     spotlightPreloadTimer = setTimeout(triggerPreloadRequest, preloadDelay);
   }
 
+  function getVueInstanceFromElement(element) {
+    if (!element) return null;
+    const component = element.__vueParentComponent || element._vueParentComponent;
+    return element.__vue__ || (component && (component.proxy || component)) || null;
+  }
+
+  function getVueComponentName(vueInstance) {
+    if (!vueInstance) return '';
+    return (
+      (vueInstance.$options && vueInstance.$options.name) ||
+      (vueInstance.$ && vueInstance.$.type && vueInstance.$.type.name) ||
+      (vueInstance.type && vueInstance.type.name) ||
+      ''
+    );
+  }
+
   function getVueInstance(input) {
-    let vueInstance = null;
-    const advancedWrapper = input.closest('.el-select, .el-date-editor, .el-cascader, .el-radio-group, .el-switch');
-    if (advancedWrapper && advancedWrapper.__vue__) {
-      vueInstance = advancedWrapper.__vue__;
-    } else {
-      const inputWrapper = input.closest('.el-input, .el-textarea');
-      if (inputWrapper && inputWrapper.__vue__) {
-        vueInstance = inputWrapper.__vue__;
-      } else {
-        vueInstance = input.__vue__;
+    if (!input || typeof input.closest !== 'function') return null;
+    const selectors = '.el-select, .el-select-v2, .el-date-editor, .el-cascader, .el-tree-select, .el-radio-group, .el-checkbox-group, .el-switch, .ant-select, .ant-picker, .ant-cascader, .ant-radio-group, .ant-checkbox-group, .ant-switch, .el-input, .el-textarea';
+    const wrapper = input.closest(selectors);
+    const directInstance = getVueInstanceFromElement(wrapper) || getVueInstanceFromElement(input);
+    if (directInstance) return directInstance;
+
+    let current = input.parentElement;
+    for (let depth = 0; current && depth < 5; depth++, current = current.parentElement) {
+      const instance = getVueInstanceFromElement(current);
+      if (instance) return instance;
+    }
+    return null;
+  }
+
+  function emitComponentValue(vueInstance, value) {
+    if (!vueInstance) return false;
+    const emit = typeof vueInstance.$emit === 'function'
+      ? vueInstance.$emit.bind(vueInstance)
+      : typeof vueInstance.emit === 'function'
+        ? vueInstance.emit.bind(vueInstance)
+        : null;
+    if (!emit) return false;
+
+    emit('update:modelValue', value);
+    emit('input', value);
+    emit('change', value);
+    return true;
+  }
+
+  function buildDatePickerValue(vueInstance, labelText = '', session) {
+    const rawType = String(
+      (vueInstance && vueInstance.type) ||
+      (vueInstance && vueInstance.$props && vueInstance.$props.type) ||
+      ''
+    ).toLowerCase();
+    const end = new Date(session && session.baseDate ? session.baseDate : Date.now());
+    const start = new Date(end);
+    start.setDate(start.getDate() - 7);
+    if (rawType.includes('range')) return [start, end];
+    if (/开始|起始|start|from/i.test(labelText)) return start;
+    if (/结束|截止|到期|end|to/i.test(labelText)) return end;
+    return end;
+  }
+
+  function setNativeProperty(element, property, value) {
+    let prototype = element;
+    while ((prototype = Object.getPrototypeOf(prototype))) {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
+      if (descriptor && typeof descriptor.set === 'function') {
+        descriptor.set.call(element, value);
+        return true;
       }
     }
-    return vueInstance;
+    try {
+      element[property] = value;
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function dispatchFieldEvents(element) {
+    ['input', 'change', 'blur'].forEach(type => {
+      element.dispatchEvent(new Event(type, { bubbles: true }));
+    });
   }
 
   function getLabelForInput(input, vueInstance) {
@@ -1036,20 +1581,22 @@
     }
     if (!labelText) labelText = input.placeholder || '';
     if (!labelText && input.name) labelText = input.name;
-    return labelText.trim();
+    return applySiteFieldAlias(labelText.trim());
   }
 
 
   function getFieldContext(inputEl) {
-    if (!inputEl || (inputEl.tagName !== 'INPUT' && inputEl.tagName !== 'TEXTAREA')) return null;
+    if (!isFormFieldElement(inputEl)) return null;
 
     const vueInstance = getVueInstance(inputEl);
     const isNativeDisabled = inputEl.disabled || inputEl.hasAttribute('disabled') || inputEl.closest('.is-disabled');
     const isVueDisabled = vueInstance && (vueInstance.disabled || vueInstance.inputDisabled || vueInstance.selectDisabled);
     if (isNativeDisabled || isVueDisabled) return null;
 
-    const componentName = vueInstance && vueInstance.$options ? vueInstance.$options.name : '';
-    if ((inputEl.readOnly || inputEl.hasAttribute('readonly')) && !CustomHooks[componentName]) return null;
+    const componentName = getVueComponentName(vueInstance);
+    const fieldKind = getFieldKind(inputEl);
+    const isReadOnlyControl = fieldKind === 'semantic-select' || fieldKind === 'cascader' || fieldKind === 'date-picker';
+    if ((inputEl.readOnly || inputEl.hasAttribute('readonly')) && !CustomHooks[componentName] && !isReadOnlyControl) return null;
 
     const labelText = getLabelForInput(inputEl, vueInstance);
     let vModelExpr = '';
@@ -1057,7 +1604,7 @@
       vModelExpr = vueInstance.$vnode.data.model.expression || '';
     }
 
-    const ignoreList = CONFIG.IGNORE_KEYWORDS || DEFAULT_CONFIG.IGNORE_KEYWORDS;
+    const ignoreList = getEffectiveIgnoreKeywords();
     const labelLower = labelText.toLowerCase();
     const modelLower = vModelExpr.toLowerCase();
     const isIgnored = ignoreList.some(keyword => {
@@ -1071,6 +1618,7 @@
       inputEl,
       vueInstance,
       componentName,
+      fieldKind,
       labelText,
       hookAction,
       supportsAiSuggestion: isAiSuggestionComponent(componentName),
@@ -1079,34 +1627,329 @@
     };
   }
 
-  function buildMockValueFromCommand(cmd) {
+  function buildMockValueFromCommand(cmd, session) {
     let mockValue = '';
     if (cmd.startsWith('__custom_')) {
       const idx = parseInt(cmd.replace('__custom_', ''), 10);
       const dict = CONFIG.CUSTOM_DICTS[idx];
       if (dict && dict.values && dict.values.length > 0) {
-        mockValue = dict.values[Math.floor(Math.random() * dict.values.length)];
+        mockValue = pickSessionValue(dict.values, session);
       } else {
-        mockValue = MockFactory.randomString();
+        mockValue = generateMockValue('randomString', session);
       }
     } else if (MockFactory[cmd]) {
-      mockValue = MockFactory[cmd]();
+      mockValue = generateMockValue(cmd, session);
     } else {
-      mockValue = resolveMockType(cmd);
+      mockValue = resolveMockType(cmd, session);
     }
     return mockValue;
   }
 
+  function normalizeOptionText(value) {
+    return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+  }
+
+  function isSafeOptionElement(element) {
+    if (!element || !isElementVisible(element)) return false;
+    if (element.disabled || element.getAttribute('aria-disabled') === 'true') return false;
+    if (element.closest('.is-disabled, .disabled, [disabled], [aria-disabled="true"]')) return false;
+    const text = normalizeOptionText(element.innerText || element.textContent);
+    return Boolean(text) && !getEffectiveOptionSkipKeywords().some(keyword => text.includes(keyword));
+  }
+
+  function getVisibleChoiceElements() {
+    const selector = [
+      '.el-select-dropdown__item', '.el-select-v2__item', '.el-cascader-node', '.el-tree-node__content',
+      '.ant-select-item-option', '.ant-cascader-menu-item',
+      '[role="listbox"] [role="option"]', '[role="option"]'
+    ].join(', ');
+    return Array.from(document.querySelectorAll(selector)).filter(isSafeOptionElement);
+  }
+
+  function waitForRender(delay = 80) {
+    return new Promise(resolve => setTimeout(resolve, delay));
+  }
+
+  function getBoundedConfigNumber(value, fallback, minimum, maximum) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(maximum, Math.max(minimum, parsed));
+  }
+
+  async function chooseDomOption(inputEl, session) {
+    const wrapper = inputEl.closest('.el-select, .el-select-v2, .el-cascader, .el-tree-select, .ant-select, .ant-cascader, [role="combobox"]') || inputEl;
+    wrapper.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    wrapper.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    if (typeof inputEl.focus === 'function') inputEl.focus();
+    const retryCount = getBoundedConfigNumber(CONFIG.REMOTE_OPTION_RETRY_COUNT, 4, 0, 10);
+    const retryDelay = getBoundedConfigNumber(CONFIG.REMOTE_OPTION_RETRY_DELAY_MS, 250, 50, 2000);
+
+    for (let attempt = 0; attempt <= retryCount; attempt++) {
+      if (attempt > 0) await waitForRender(retryDelay);
+      const options = getVisibleChoiceElements();
+      if (!options.length) continue;
+      const option = pickSessionValue(options, session);
+      option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      option.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      option.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return true;
+    }
+    return false;
+  }
+
+  function chooseNativeSelect(inputEl, session) {
+    const options = Array.from(inputEl.options || []).filter(option => {
+      const text = normalizeOptionText(option.textContent || option.label || option.value);
+      return !option.disabled && option.value !== '' && !getEffectiveOptionSkipKeywords().some(keyword => text.includes(keyword));
+    });
+    if (!options.length) return false;
+
+    if (inputEl.multiple) {
+      const count = Math.min(options.length, Math.max(1, Math.ceil(getSessionRandom(session)() * 2)));
+      const selected = [...options].sort(() => getSessionRandom(session)() - 0.5).slice(0, count);
+      Array.from(inputEl.options).forEach(option => setNativeProperty(option, 'selected', selected.includes(option)));
+    } else {
+      const option = pickSessionValue(options, session);
+      setNativeProperty(inputEl, 'value', option.value);
+    }
+    dispatchFieldEvents(inputEl);
+    return true;
+  }
+
+  function chooseNativeCheck(inputEl, session) {
+    if (inputEl.type === 'radio') {
+      const group = inputEl.name
+        ? Array.from(document.getElementsByName(inputEl.name)).filter(input => input.type === 'radio' && !input.disabled && isFieldVisible(input))
+        : [inputEl];
+      if (!group.length) return false;
+      const selected = pickSessionValue(group, session);
+      setNativeProperty(selected, 'checked', true);
+      dispatchFieldEvents(selected);
+      return true;
+    }
+    setNativeProperty(inputEl, 'checked', true);
+    dispatchFieldEvents(inputEl);
+    return true;
+  }
+
+  function getAssociationKey(inputEl, labelText) {
+    const raw = String(labelText || inputEl.name || inputEl.id || '').toLowerCase();
+    return raw.replace(/确认|再次|重复|重新|confirm|repeat|again|\s|[_-]/g, '');
+  }
+
+  function isConfirmationField(inputEl, labelText) {
+    const text = `${labelText || ''} ${inputEl.name || ''} ${inputEl.id || ''}`.toLowerCase();
+    return /确认|再次|重复|重新|confirm|repeat|again/.test(text);
+  }
+
+  function padNumber(value) {
+    return String(value).padStart(2, '0');
+  }
+
+  function getValidationFillMode() {
+    return ['normal', 'boundary', 'invalid'].includes(CONFIG.FILL_VALIDATION_MODE)
+      ? CONFIG.FILL_VALIDATION_MODE
+      : 'normal';
+  }
+
+  function takeBoundaryValue(session, first, second) {
+    const index = session ? session.boundaryIndex++ : 0;
+    return index % 2 === 0 ? first : second;
+  }
+
+  function buildInvalidMockValue(inputEl) {
+    const fieldType = String(inputEl.type || '').toLowerCase();
+    if (inputEl.required) return '';
+    if (fieldType === 'email') return 'invalid-email';
+    if (fieldType === 'url') return 'invalid-url';
+    if (fieldType === 'number' || fieldType === 'range') {
+      const min = Number(inputEl.min);
+      const max = Number(inputEl.max);
+      const step = Number(inputEl.step) || 1;
+      if (Number.isFinite(max)) return String(max + step);
+      if (Number.isFinite(min)) return String(min - step);
+      return '-1';
+    }
+    if (['date', 'time', 'month', 'week', 'datetime-local'].includes(fieldType)) {
+      if (inputEl.max) return `${inputEl.max}x`;
+      if (inputEl.min) return `${inputEl.min}x`;
+      return 'invalid-date';
+    }
+    if (inputEl.pattern) return 'INVALID';
+    return '异常测试数据';
+  }
+
+  function applyBoundaryTextValue(value, inputEl, session) {
+    if (getValidationFillMode() !== 'boundary') return value;
+    const maxLength = Number(inputEl.maxLength);
+    const minLength = Number(inputEl.minLength);
+    const targetLength = Number.isFinite(maxLength) && maxLength > 0
+      ? Math.min(maxLength, 256)
+      : Number.isFinite(minLength) && minLength > 0
+        ? Math.min(minLength, 256)
+        : 0;
+    if (!targetLength) return value;
+    const source = '边界测试数据';
+    const boundary = source.repeat(Math.ceil(targetLength / source.length)).slice(0, targetLength);
+    return takeBoundaryValue(session, value, boundary);
+  }
+
+  function buildDateInputValue(inputEl, labelText, session) {
+    if (getValidationFillMode() === 'boundary' && (inputEl.min || inputEl.max)) {
+      return takeBoundaryValue(session, inputEl.min || inputEl.max, inputEl.max || inputEl.min);
+    }
+    const date = new Date(session && session.baseDate ? session.baseDate : Date.now());
+    if (/开始|起始|start|from/i.test(labelText)) date.setDate(date.getDate() - 7);
+    if (/结束|截止|到期|end|to/i.test(labelText)) date.setDate(date.getDate() + 7);
+    const type = String(inputEl.type || '').toLowerCase();
+    if (type === 'time') return `${padNumber(date.getHours())}:${padNumber(date.getMinutes())}`;
+    if (type === 'month') return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}`;
+    if (type === 'datetime-local') return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())}T${padNumber(date.getHours())}:${padNumber(date.getMinutes())}`;
+    return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())}`;
+  }
+
+  function buildConstrainedMockValue(inputEl, labelText, session) {
+    const fieldType = String(inputEl.type || '').toLowerCase();
+    const associationKey = getAssociationKey(inputEl, labelText);
+    if (isConfirmationField(inputEl, labelText) && session.values.has(associationKey)) {
+      return session.values.get(associationKey);
+    }
+
+    if (getValidationFillMode() === 'invalid') {
+      const invalidValue = buildInvalidMockValue(inputEl);
+      session.values.set(associationKey, invalidValue);
+      return invalidValue;
+    }
+
+    let value;
+    if (['date', 'time', 'month', 'week', 'datetime-local'].includes(fieldType)) {
+      value = buildDateInputValue(inputEl, labelText, session);
+    } else if (fieldType === 'email') {
+      value = generateMockValue('email', session);
+    } else if (fieldType === 'tel') {
+      value = generateMockValue('phone', session);
+    } else if (fieldType === 'url') {
+      value = generateMockValue('url', session);
+    } else if (fieldType === 'number' || fieldType === 'range') {
+      const min = Number(inputEl.min);
+      const max = Number(inputEl.max);
+      const lower = Number.isFinite(min) ? min : 1;
+      const upper = Number.isFinite(max) && max >= lower ? max : Math.max(lower + 100, 100);
+      const step = Number(inputEl.step);
+      const amount = CONFIG.NUMBER_FILL_STRATEGY === 'boundary' || getValidationFillMode() === 'boundary'
+        ? takeBoundaryValue(session, lower, upper)
+        : lower + getSessionRandom(session)() * (upper - lower);
+      const rounded = Number.isFinite(step) && step > 0 ? Math.round((amount - lower) / step) * step + lower : Math.round(amount);
+      value = String(Math.min(upper, Math.max(lower, rounded)));
+    } else {
+      value = String(resolveMockType(labelText, session));
+      if (inputEl.pattern && /\d|\[0-9/.test(inputEl.pattern) && !/\D/.test(inputEl.pattern)) {
+        value = String(generateMockValue('number', session));
+      }
+    }
+
+    const maxLength = Number(inputEl.maxLength);
+    value = applyBoundaryTextValue(value, inputEl, session);
+    if (Number.isFinite(maxLength) && maxLength >= 0 && value.length > maxLength) {
+      value = value.slice(0, maxLength);
+    }
+    session.values.set(associationKey, value);
+    return value;
+  }
+
+  function applyNativeValue(inputEl, value) {
+    if (inputEl.isContentEditable) {
+      inputEl.textContent = value;
+      dispatchFieldEvents(inputEl);
+      return true;
+    }
+    if (!setNativeProperty(inputEl, 'value', value)) return false;
+    dispatchFieldEvents(inputEl);
+    return true;
+  }
+
+  function clearFieldForInvalidMode(inputEl, vueInstance, fieldKind) {
+    if (fieldKind === 'native-select' || fieldKind === 'native-multi-select') {
+      Array.from(inputEl.options || []).forEach(option => setNativeProperty(option, 'selected', false));
+      setNativeProperty(inputEl, 'value', '');
+      dispatchFieldEvents(inputEl);
+      return true;
+    }
+    if (fieldKind === 'checkbox') {
+      setNativeProperty(inputEl, 'checked', false);
+      dispatchFieldEvents(inputEl);
+      return true;
+    }
+    if (fieldKind === 'radio') {
+      const radios = inputEl.name ? Array.from(document.getElementsByName(inputEl.name)) : [inputEl];
+      radios.filter(radio => radio.type === 'radio').forEach(radio => setNativeProperty(radio, 'checked', false));
+      dispatchFieldEvents(inputEl);
+      return true;
+    }
+    if ((fieldKind === 'semantic-select' || fieldKind === 'cascader' || fieldKind === 'date-picker') && emitComponentValue(vueInstance, null)) {
+      return true;
+    }
+    return false;
+  }
+
+  async function fillField(inputEl, session, forcedCommand) {
+    const context = getFieldContext(inputEl);
+    if (!context) return { status: 'skipped' };
+    const { vueInstance, componentName, fieldKind, labelText } = context;
+
+    if (!forcedCommand && getValidationFillMode() === 'invalid' && clearFieldForInvalidMode(inputEl, vueInstance, fieldKind)) {
+      return { status: 'filled' };
+    }
+
+    if (fieldKind === 'native-select' || fieldKind === 'native-multi-select') {
+      return { status: chooseNativeSelect(inputEl, session) ? 'filled' : 'skipped' };
+    }
+    if (fieldKind === 'checkbox' || fieldKind === 'radio') {
+      return { status: chooseNativeCheck(inputEl, session) ? 'filled' : 'skipped' };
+    }
+    if (fieldKind === 'semantic-select' || fieldKind === 'cascader') {
+      if (vueInstance && CustomHooks[componentName] && CustomHooks[componentName](vueInstance, labelText, session)) {
+        return { status: 'filled' };
+      }
+      return { status: await chooseDomOption(inputEl, session) ? 'filled' : 'skipped' };
+    }
+    if (vueInstance && CustomHooks[componentName] && !forcedCommand) {
+      return { status: CustomHooks[componentName](vueInstance, labelText, session) ? 'filled' : 'skipped' };
+    }
+
+    const value = forcedCommand ? buildMockValueFromCommand(forcedCommand, session) : buildConstrainedMockValue(inputEl, labelText, session);
+    if (vueInstance && emitComponentValue(vueInstance, value)) return { status: 'filled' };
+    return { status: applyNativeValue(inputEl, value) ? 'filled' : 'skipped' };
+  }
+
   function applyDirectCommandToInput(inputEl, cmd) {
     if (!inputEl || !cmd) return false;
-    const mockValue = buildMockValueFromCommand(cmd);
-    fillElement(inputEl, mockValue);
+    const session = createMockSession();
+    const operation = createFillOperation('spotlight');
+    const snapshot = captureFieldSnapshot(inputEl);
+    fillField(inputEl, session, cmd)
+      .then(outcome => {
+        recordOperationSnapshot(operation, snapshot, outcome);
+        if (!operation.snapshots.length) return;
+        lastFillOperation = operation;
+        showUndoAction(operation);
+      })
+      .catch(error => console.warn('[AutoMock] 单字段填充失败:', error));
     return true;
   }
 
   function applyLocalFallback(context) {
     if (context.hookAction) {
-      return context.hookAction();
+      const session = createMockSession();
+      const operation = createFillOperation('spotlight');
+      const snapshot = captureFieldSnapshot(context.inputEl);
+      const success = context.hookAction(session);
+      if (success) {
+        recordOperationSnapshot(operation, snapshot, { status: 'filled' });
+        lastFillOperation = operation;
+        showUndoAction(operation);
+      }
+      return success;
     }
     if (context.fallbackPrediction) {
       return applyDirectCommandToInput(context.inputEl, context.fallbackPrediction.cmd);
@@ -1377,6 +2220,11 @@
     title.style.cssText = 'font-size: 16px; color: #333; margin-bottom: 20px; font-weight: bold; user-select: none; text-align: center;';
     panel.appendChild(title);
 
+    const undoStatus = document.createElement('div');
+    undoStatus.setAttribute('data-role', 'spotlight-undo-status');
+    undoStatus.style.cssText = 'font-size:12px;color:#909399;margin:-12px 0 14px;text-align:center;';
+    panel.appendChild(undoStatus);
+
     const loadingHint = document.createElement('div');
     loadingHint.setAttribute('data-role', 'recommend-loading');
     loadingHint.innerText = '正在准备推荐区...';
@@ -1487,6 +2335,10 @@
     const context = resolveSpotlightContext();
     container = ensureSpotlightVisible();
     const panel = container ? container.querySelector('div') : null;
+    const undoStatus = panel ? panel.querySelector('[data-role="spotlight-undo-status"]') : null;
+    if (undoStatus) undoStatus.textContent = lastFillOperation && lastFillOperation.snapshots.length
+      ? `可撤销上次填充的 ${lastFillOperation.snapshots.length} 项字段`
+      : '当前没有可撤销的填充操作';
     renderSpotlightByContext(panel, context);
   }
 
@@ -1514,90 +2366,239 @@
   }
 
   function fillElement(inputEl, mockValue) {
-    // 寻找 Vue 实例进行绑定更新
-    let vueInstance = null;
-    const advancedWrapper = inputEl.closest('.el-select, .el-date-editor, .el-cascader, .el-radio-group, .el-switch');
-    if (advancedWrapper && advancedWrapper.__vue__) {
-      vueInstance = advancedWrapper.__vue__;
-    } else {
-      const inputWrapper = inputEl.closest('.el-input, .el-textarea');
-      if (inputWrapper && inputWrapper.__vue__) {
-        vueInstance = inputWrapper.__vue__;
-      } else {
-        vueInstance = inputEl.__vue__;
-      }
-    }
+    const vueInstance = getVueInstance(inputEl);
+    if (emitComponentValue(vueInstance, mockValue)) return true;
+    return applyNativeValue(inputEl, mockValue);
+  }
 
-    if (vueInstance) {
-      vueInstance.$emit('input', mockValue);
-      vueInstance.$emit('change', mockValue);
-    } else {
-      // 原生回退
-      inputEl.value = mockValue;
-      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-      inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+  function getCurrentFieldValue(inputEl) {
+    if (inputEl.isContentEditable) return (inputEl.textContent || '').trim();
+    if (inputEl.type === 'radio' && inputEl.name) {
+      return Array.from(document.getElementsByName(inputEl.name)).some(input => input.type === 'radio' && input.checked) ? 'checked' : '';
     }
+    if (inputEl.type === 'checkbox' || inputEl.type === 'radio') return inputEl.checked ? 'checked' : '';
+    if (inputEl.tagName === 'SELECT' && inputEl.multiple) {
+      return Array.from(inputEl.selectedOptions || []).map(option => option.value).join(',');
+    }
+    return String(inputEl.value == null ? '' : inputEl.value).trim();
+  }
+
+  function getNativeValidityReason(validity) {
+    if (!validity) return '';
+    if (validity.valueMissing) return '必填项未填写';
+    if (validity.typeMismatch) return '格式不符合字段类型';
+    if (validity.patternMismatch) return '未匹配字段格式规则';
+    if (validity.rangeUnderflow) return '小于允许的最小值';
+    if (validity.rangeOverflow) return '超过允许的最大值';
+    if (validity.stepMismatch) return '未匹配数值步长';
+    if (validity.tooShort) return '长度不足';
+    if (validity.tooLong) return '长度超限';
+    if (validity.badInput) return '输入内容无效';
+    if (validity.customError) return '自定义校验失败';
+    return '';
+  }
+
+  function validateFilledForm(root) {
+    const seen = new Set();
+    const issues = [];
+    collectFillableInputs(root).forEach(inputEl => {
+      const identity = getFieldIdentity(inputEl);
+      if (seen.has(identity)) return;
+      seen.add(identity);
+      if (inputEl.disabled || inputEl.closest('.is-disabled')) return;
+
+      const label = getLabelForInput(inputEl, getVueInstance(inputEl)) || '未命名字段';
+      const reasons = new Set();
+      if (inputEl.required && !getCurrentFieldValue(inputEl)) reasons.add('必填项未填写');
+      const nativeReason = getNativeValidityReason(inputEl.validity);
+      if (nativeReason) reasons.add(nativeReason);
+      if (inputEl.getAttribute('aria-invalid') === 'true') reasons.add('页面标记为无效');
+      if (inputEl.closest('.el-form-item.is-error, .el-form-item--error, .ant-form-item-has-error')) {
+        reasons.add('组件校验错误');
+      }
+      if (reasons.size > 0) issues.push({ label, reasons: Array.from(reasons) });
+    });
+    return issues;
+  }
+
+  function showValidationDiagnostics(issues) {
+    const existing = document.getElementById('mock-ext-validation-diagnostics');
+    if (existing) existing.remove();
+    if (!issues || issues.length === 0) return;
+
+    const panel = document.createElement('div');
+    panel.id = 'mock-ext-validation-diagnostics';
+    panel.style.cssText = [
+      'position:fixed', 'right:24px', 'bottom:76px', 'z-index:10000000', 'width:340px',
+      'max-height:320px', 'overflow:auto', 'box-sizing:border-box', 'padding:14px',
+      'border:1px solid #f3d19e', 'border-radius:6px', 'background:#fffaf0', 'color:#606266',
+      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif', 'font-size:13px',
+      'box-shadow:0 8px 22px rgba(0,0,0,.16)'
+    ].join(';');
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;color:#e6a23c;font-weight:600;';
+    const title = document.createElement('span');
+    title.textContent = `表单校验提示 (${issues.length})`;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = '×';
+    close.title = '关闭校验提示';
+    close.style.cssText = 'border:0;background:transparent;color:#909399;font-size:20px;line-height:16px;cursor:pointer;padding:0 2px;';
+    close.onclick = () => panel.remove();
+    header.append(title, close);
+    panel.appendChild(header);
+
+    issues.slice(0, 12).forEach(issue => {
+      const item = document.createElement('div');
+      item.style.cssText = 'padding:8px 0;border-top:1px solid #f8e3bd;line-height:1.5;';
+      const label = document.createElement('div');
+      label.style.cssText = 'font-weight:600;color:#606266;';
+      label.textContent = issue.label;
+      const reason = document.createElement('div');
+      reason.style.cssText = 'color:#909399;';
+      reason.textContent = issue.reasons.join('；');
+      item.append(label, reason);
+      panel.appendChild(item);
+    });
+    if (issues.length > 12) {
+      const more = document.createElement('div');
+      more.style.cssText = 'padding-top:8px;color:#909399;';
+      more.textContent = `另有 ${issues.length - 12} 项未展开`;
+      panel.appendChild(more);
+    }
+    document.body.appendChild(panel);
+  }
+
+  function showOperationToast(message, success) {
+    const existing = document.getElementById('mock-ext-operation-toast');
+    if (existing) existing.remove();
+    const toast = document.createElement('div');
+    toast.id = 'mock-ext-operation-toast';
+    toast.textContent = message;
+    toast.style.cssText = `position:fixed;right:24px;bottom:24px;z-index:10000001;padding:12px 16px;border-radius:6px;color:#fff;font-size:13px;background:${success ? '#67c23a' : '#e6a23c'};box-shadow:0 8px 22px rgba(0,0,0,.18);pointer-events:none;`;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3200);
+  }
+
+  function showUndoAction(operation) {
+    const existing = document.getElementById('mock-ext-undo-action');
+    if (existing) existing.remove();
+    if (!operation || !operation.snapshots.length) return;
+    const action = document.createElement('button');
+    action.id = 'mock-ext-undo-action';
+    action.type = 'button';
+    action.textContent = `撤销本次填充 (${operation.snapshots.length})`;
+    action.title = '恢复本次填充前的字段状态';
+    action.style.cssText = 'position:fixed;right:24px;bottom:72px;z-index:10000001;padding:9px 12px;border:1px solid #c6e2ff;border-radius:6px;background:#ecf5ff;color:#409eff;font-size:13px;cursor:pointer;box-shadow:0 6px 16px rgba(0,0,0,.12);';
+    action.onclick = () => undoLastFillOperation();
+    document.body.appendChild(action);
+  }
+
+  function undoLastFillOperation() {
+    const operation = lastFillOperation;
+    if (!operation || !operation.snapshots.length) {
+      showOperationToast('Auto Mock：没有可撤销的填充操作', false);
+      return;
+    }
+    let restored = 0;
+    let skipped = 0;
+    operation.snapshots.slice().reverse().forEach(snapshot => {
+      if (restoreFieldSnapshot(snapshot)) restored++;
+      else skipped++;
+    });
+    lastFillOperation = null;
+    const action = document.getElementById('mock-ext-undo-action');
+    if (action) action.remove();
+    showOperationToast(`Auto Mock：已恢复 ${restored} 项${skipped ? `，跳过 ${skipped} 项` : ''}`, restored > 0);
+  }
+
+  function showFillSummary(result) {
+    const existing = document.getElementById('mock-ext-fill-summary');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.id = 'mock-ext-fill-summary';
+    const issueCount = result.validationIssues ? result.validationIssues.length : 0;
+    toast.textContent = result.total === 0
+      ? 'Auto Mock：未发现可填充字段'
+      : `Auto Mock：已填充 ${result.filled} 项，跳过 ${result.skipped} 项${result.failed ? `，失败 ${result.failed} 项` : ''}${issueCount ? `，校验问题 ${issueCount} 项` : ''}`;
+    toast.style.cssText = [
+      'position:fixed', 'right:24px', 'bottom:24px', 'z-index:10000000',
+      'padding:12px 16px', 'border-radius:6px', 'color:#fff', 'font-size:13px',
+      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+      `background:${result.filled ? '#67c23a' : '#e6a23c'}`,
+      'box-shadow:0 8px 22px rgba(0,0,0,.18)', 'pointer-events:none'
+    ].join(';');
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3200);
+    showValidationDiagnostics(result.validationIssues);
+  }
+
+  function shouldRetrySkippedField(inputEl) {
+    const kind = getFieldKind(inputEl);
+    return Boolean(
+      inputEl.disabled ||
+      inputEl.readOnly ||
+      inputEl.closest('.is-disabled') ||
+      kind === 'semantic-select' ||
+      kind === 'cascader' ||
+      kind === 'date-picker'
+    );
   }
 
   // ==========================================
   // 5. 批量填充
   // ==========================================
-  async function fillElementUiForms() {
-    const activeDialogRoot = getActiveDialogRoot();
-    const inputs = collectFillableInputs(activeDialogRoot || document);
-    let fillCount = 0;
-    let skipCount = 0;
+  async function fillElementUiForms(options = {}) {
+    const requestedRoot = options.root && isElementVisible(options.root) ? options.root : null;
+    const activeDialogRoot = requestedRoot || getActiveDialogRoot();
+    const session = options.session || createMockSession();
+    const operation = options.operation || session.operation || createFillOperation(options.silent ? 'dynamic' : 'batch');
+    session.operation = operation;
+    if (session.dynamicFillInProgress) return { total: 0, filled: 0, skipped: 0, failed: 0 };
 
-    for (let i = 0; i < inputs.length; i++) {
-      const input = inputs[i];
-      if (i > 0 && i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+    const fields = collectFillableFields(activeDialogRoot || document)
+      .filter(field => !session.handledFieldElements.has(field.inputEl));
+    const result = { total: fields.length, filled: 0, skipped: 0, failed: 0 };
+    session.dynamicFillInProgress = true;
 
-      const vueInstance = getVueInstance(input);
-      const componentName = vueInstance && vueInstance.$options ? vueInstance.$options.name : '';
-
-      const isNativeDisabled = input.disabled || input.hasAttribute('disabled') || input.closest('.is-disabled');
-      const isVueDisabled = vueInstance && (vueInstance.disabled || vueInstance.inputDisabled || vueInstance.selectDisabled);
-      if (isNativeDisabled || isVueDisabled) continue;
-
-      if (input.readOnly || input.hasAttribute('readonly')) {
-        if (!CustomHooks[componentName]) continue;
-      }
-
-      const labelText = getLabelForInput(input, vueInstance);
-
-      let vModelExpr = '';
-      if (vueInstance && vueInstance.$vnode && vueInstance.$vnode.data && vueInstance.$vnode.data.model) {
-        vModelExpr = vueInstance.$vnode.data.model.expression || '';
-      }
-      
-      const isIgnored = CONFIG.IGNORE_KEYWORDS.some(keyword => {
-        const kw = keyword.toLowerCase();
-        return labelText.toLowerCase().includes(kw) || (vModelExpr && vModelExpr.toLowerCase().includes(kw));
-      });
-      if (isIgnored) {
-        skipCount++;
-        continue;
-      }
-      
-      if (vueInstance) {
-        if (CustomHooks[componentName]) {
-          const success = CustomHooks[componentName](vueInstance, labelText);
-          if (success) fillCount++;
-        } else {
-          const mockValue = resolveMockType(labelText);
-          vueInstance.$emit('input', mockValue);
-          vueInstance.$emit('change', mockValue);
-          fillCount++;
-        }
-      } else {
-        if (!input.readOnly && !input.disabled) {
-          input.value = resolveMockType(labelText);
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-          fillCount++;
+    try {
+      for (let i = 0; i < fields.length; i++) {
+        if (i > 0 && i % 5 === 0) await waitForRender(0);
+        try {
+          const snapshot = captureFieldSnapshot(fields[i].inputEl);
+          const outcome = await fillField(fields[i].inputEl, session);
+          if (outcome.status === 'filled') result.filled++;
+          else result.skipped++;
+          recordOperationSnapshot(operation, snapshot, outcome);
+          if (outcome.status === 'filled' || !shouldRetrySkippedField(fields[i].inputEl)) {
+            session.handledFieldElements.add(fields[i].inputEl);
+          }
+        } catch (error) {
+          console.warn('[AutoMock] 批量填充字段失败:', error);
+          session.handledFieldElements.add(fields[i].inputEl);
+          operation.failed++;
+          result.failed++;
         }
       }
+    } finally {
+      session.dynamicFillInProgress = false;
     }
+    if (!options.silent && CONFIG.VALIDATE_AFTER_FILL !== false) {
+      result.validationIssues = validateFilledForm(activeDialogRoot || document);
+    }
+    if (!options.silent) {
+      if (operation.snapshots.length) lastFillOperation = operation;
+      showFillSummary(result);
+      showUndoAction(lastFillOperation);
+    } else if (operation === lastFillOperation && operation.snapshots.length) {
+      showUndoAction(operation);
+    }
+    if (!activeDialogRoot && options.watchNextDialog !== false) {
+      startDeferredDialogFill(session);
+    }
+    return result;
   }
 
   // ==========================================
@@ -1633,7 +2634,7 @@
     `;
     const panel = document.createElement('div');
     panel.style.cssText = `
-      width: 480px; background: #fff; border-radius: 12px; padding: 24px; box-sizing: border-box;
+      width: 480px; max-height: calc(100vh - 40px); overflow-y: auto; background: #fff; border-radius: 12px; padding: 24px; box-sizing: border-box;
       font-family: -apple-system, sans-serif; color: #333; box-shadow: 0 20px 40px rgba(0,0,0,0.15);
     `;
     panel.innerHTML = `
@@ -1662,6 +2663,71 @@
       <div style="margin-bottom: 15px;">
         <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">🔧 自定义扩展数据字典 (JSON 数组)</label>
         <textarea id="setting-dicts" style="width: 100%; height: 80px; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; resize: none; box-sizing: border-box; font-size: 13px; outline: none; transition: border-color .2s; font-family: monospace;" placeholder='[\n  { "label": "测试账号", "regex": "账号|account", "values": ["test01", "test02"] }\n]' onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"></textarea>
+      </div>
+
+      <div style="margin-bottom: 24px; padding: 14px; border: 1px solid #d9ecff; border-radius: 6px; background: #f5faff;">
+        <label style="display: block; font-size: 14px; font-weight: 600; margin-bottom: 8px; color: #409eff;">站点适配规则</label>
+        <div id="setting-site-rule-status" style="font-size:12px; color:#909399; margin-bottom:8px;"></div>
+        <textarea id="setting-site-rules" style="width:100%; height:120px; padding:10px; border:1px solid #dcdfe6; border-radius:4px; resize:vertical; box-sizing:border-box; font-size:12px; line-height:1.5; font-family:monospace;" placeholder='[\n  {\n    "name": "示例系统",\n    "hosts": ["*.example.com"],\n    "fieldAliases": { "联系人": "姓名" },\n    "ignoreKeywords": ["内部编号"],\n    "optionSkipKeywords": ["全部"],\n    "inputSelectors": [".custom-input input"],\n    "dialogSelectors": [".custom-dialog"]\n  }\n]'></textarea>
+        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+          <button type="button" id="setting-import-site-rules" style="padding:7px 12px; border:1px solid #c6e2ff; border-radius:4px; background:#ecf5ff; color:#409eff; cursor:pointer; font-size:12px;">导入 JSON</button>
+          <button type="button" id="setting-export-site-rules" style="padding:7px 12px; border:1px solid #c6e2ff; border-radius:4px; background:#ecf5ff; color:#409eff; cursor:pointer; font-size:12px;">导出 JSON</button>
+        </div>
+      </div>
+
+      <div style="margin-bottom: 24px; padding: 14px; border: 1px solid #d9ecff; border-radius: 6px; background: #f5faff;">
+        <label style="display: block; font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #409eff;">测试数据场景</label>
+        <div style="display:flex; align-items:center; margin-bottom:10px;">
+          <span style="width:100px; font-size:13px; color:#606266;">业务类型:</span>
+          <select id="setting-data-profile" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:4px; box-sizing:border-box; font-size:13px; background:#fff;">
+            <option value="general">通用后台数据</option>
+            <option value="employee">员工档案数据</option>
+            <option value="enterprise">企业入驻数据</option>
+            <option value="order">订单业务数据</option>
+          </select>
+        </div>
+        <div style="display:flex; align-items:center; margin-bottom:10px;">
+          <span style="width:100px; font-size:13px; color:#606266;">固定随机种子:</span>
+          <input id="setting-random-seed" type="text" placeholder="留空则每次随机" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:4px; box-sizing:border-box; font-size:13px;"/>
+        </div>
+        <div style="display:flex; align-items:center;">
+          <span style="width:100px; font-size:13px; color:#606266;">数值策略:</span>
+          <select id="setting-number-strategy" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:4px; box-sizing:border-box; font-size:13px; background:#fff;">
+            <option value="normal">正常随机值</option>
+            <option value="boundary">最小/最大值交替</option>
+          </select>
+        </div>
+        <div style="display:flex; align-items:center; margin-top:10px;">
+          <span style="width:100px; font-size:13px; color:#606266;">填充模式:</span>
+          <select id="setting-validation-mode" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:4px; box-sizing:border-box; font-size:13px; background:#fff;">
+            <option value="normal">正常数据</option>
+            <option value="boundary">边界数据</option>
+            <option value="invalid">异常数据（校验用）</option>
+          </select>
+        </div>
+        <label style="display:flex; align-items:center; gap:8px; margin:10px 0 0 100px; font-size:12px; color:#606266;">
+          <input type="checkbox" id="setting-validate-after-fill"/>
+          填充后检查必填、格式、范围和组件错误态
+        </label>
+        <div style="margin-top:14px; padding-top:12px; border-top:1px solid #d9ecff;">
+          <div style="font-size:13px; font-weight:600; color:#409eff; margin-bottom:10px;">动态流程</div>
+          <div style="display:flex; align-items:center; margin-bottom:8px;">
+            <span style="width:100px; font-size:13px; color:#606266;">下拉重试次数:</span>
+            <input id="setting-option-retries" type="number" min="0" max="10" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:4px; box-sizing:border-box; font-size:13px;"/>
+          </div>
+          <div style="display:flex; align-items:center; margin-bottom:8px;">
+            <span style="width:100px; font-size:13px; color:#606266;">重试间隔(ms):</span>
+            <input id="setting-option-delay" type="number" min="50" max="2000" step="50" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:4px; box-sizing:border-box; font-size:13px;"/>
+          </div>
+          <div style="display:flex; align-items:center; margin-bottom:8px;">
+            <span style="width:100px; font-size:13px; color:#606266;">动态窗口(ms):</span>
+            <input id="setting-dynamic-window" type="number" min="1000" max="60000" step="1000" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:4px; box-sizing:border-box; font-size:13px;"/>
+          </div>
+          <div style="display:flex; align-items:center;">
+            <span style="width:100px; font-size:13px; color:#606266;">后续弹窗层数:</span>
+            <input id="setting-dialog-steps" type="number" min="1" max="10" style="flex:1; padding:8px; border:1px solid #dcdfe6; border-radius:4px; box-sizing:border-box; font-size:13px;"/>
+          </div>
+        </div>
       </div>
 
       <div style="margin-bottom: 24px;">
@@ -1711,6 +2777,19 @@
       shortcutAiTrigger: panel.querySelector('#setting-ai-trigger'),
       ignoreKeywords: panel.querySelector('#setting-ignore'),
       customDicts: panel.querySelector('#setting-dicts'),
+      siteRules: panel.querySelector('#setting-site-rules'),
+      siteRuleStatus: panel.querySelector('#setting-site-rule-status'),
+      importSiteRules: panel.querySelector('#setting-import-site-rules'),
+      exportSiteRules: panel.querySelector('#setting-export-site-rules'),
+      dataProfile: panel.querySelector('#setting-data-profile'),
+      randomSeed: panel.querySelector('#setting-random-seed'),
+      numberStrategy: panel.querySelector('#setting-number-strategy'),
+      validationMode: panel.querySelector('#setting-validation-mode'),
+      validateAfterFill: panel.querySelector('#setting-validate-after-fill'),
+      optionRetries: panel.querySelector('#setting-option-retries'),
+      optionDelay: panel.querySelector('#setting-option-delay'),
+      dynamicWindow: panel.querySelector('#setting-dynamic-window'),
+      dialogSteps: panel.querySelector('#setting-dialog-steps'),
       aiManualMode: panel.querySelector('#setting-ai-manual-mode'),
       aiClassification: panel.querySelector('#setting-ai-enable-classification'),
       aiPreload: panel.querySelector('#setting-ai-enable-preload'),
@@ -1729,6 +2808,20 @@
     settings.customDicts.value = Array.isArray(CONFIG.CUSTOM_DICTS) && CONFIG.CUSTOM_DICTS.length > 0
       ? JSON.stringify(CONFIG.CUSTOM_DICTS, null, 2)
       : '';
+    settings.siteRules.value = JSON.stringify(normalizeSiteRules(CONFIG.SITE_RULES), null, 2);
+    const activeSiteRule = getActiveSiteRule();
+    settings.siteRuleStatus.textContent = activeSiteRule
+      ? `当前域名 ${window.location.hostname} 已匹配规则：${activeSiteRule.name}`
+      : `当前域名 ${window.location.hostname} 未匹配站点规则`;
+    settings.dataProfile.value = DATA_PROFILES[CONFIG.DATA_PROFILE] ? CONFIG.DATA_PROFILE : 'general';
+    settings.randomSeed.value = CONFIG.RANDOM_SEED || '';
+    settings.numberStrategy.value = CONFIG.NUMBER_FILL_STRATEGY === 'boundary' ? 'boundary' : 'normal';
+    settings.validationMode.value = getValidationFillMode();
+    settings.validateAfterFill.checked = CONFIG.VALIDATE_AFTER_FILL !== false;
+    settings.optionRetries.value = getBoundedConfigNumber(CONFIG.REMOTE_OPTION_RETRY_COUNT, 4, 0, 10);
+    settings.optionDelay.value = getBoundedConfigNumber(CONFIG.REMOTE_OPTION_RETRY_DELAY_MS, 250, 50, 2000);
+    settings.dynamicWindow.value = getBoundedConfigNumber(CONFIG.DYNAMIC_FILL_WINDOW_MS, 8000, 1000, 60000);
+    settings.dialogSteps.value = getBoundedConfigNumber(CONFIG.DYNAMIC_FILL_MAX_DIALOG_STEPS, 3, 1, 10);
     settings.aiManualMode.checked = CONFIG.AI_MANUAL_TRIGGER_MODE !== false;
     settings.aiClassification.checked = CONFIG.AI_ENABLE_CLASSIFICATION !== false;
     settings.aiPreload.checked = CONFIG.AI_ENABLE_PRELOAD === true;
@@ -1738,6 +2831,40 @@
     settings.apiKey.placeholder = CONFIG.DEEPSEEK_API_KEY ? '已配置，留空保持不变' : 'sk-...';
     settings.clearApiKey.disabled = !CONFIG.DEEPSEEK_API_KEY;
 
+    settings.importSiteRules.onclick = () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json,.json';
+      input.onchange = () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const rules = parseSiteRulesText(reader.result);
+            settings.siteRules.value = JSON.stringify(rules, null, 2);
+          } catch (error) {
+            alert(`站点规则导入失败：${error.message}`);
+          }
+        };
+        reader.readAsText(file);
+      };
+      input.click();
+    };
+    settings.exportSiteRules.onclick = () => {
+      try {
+        const rules = parseSiteRulesText(settings.siteRules.value);
+        const blob = new Blob([JSON.stringify(rules, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'auto-mock-site-rules.json';
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      } catch (error) {
+        alert(`站点规则导出失败：${error.message}`);
+      }
+    };
     settings.cancel.onclick = () => container.remove();
     settings.save.onclick = () => {
       CONFIG.SHORTCUT_SPOTLIGHT = settings.shortcutSpotlight.value.toLowerCase() || 'x';
@@ -1760,7 +2887,27 @@
           return;
         }
       }
+      const siteRuleText = settings.siteRules.value.trim() || '[]';
+      let parsedSiteRules;
+      try {
+        parsedSiteRules = parseSiteRulesText(siteRuleText);
+      } catch (error) {
+        alert(`站点规则 JSON 格式错误，请检查！\n${error.message}`);
+        return;
+      }
       CONFIG.CUSTOM_DICTS = parsedDicts;
+      CONFIG.SITE_RULES = parsedSiteRules;
+      CONFIG.DATA_PROFILE = DATA_PROFILES[settings.dataProfile.value] ? settings.dataProfile.value : 'general';
+      CONFIG.RANDOM_SEED = settings.randomSeed.value.trim();
+      CONFIG.NUMBER_FILL_STRATEGY = settings.numberStrategy.value === 'boundary' ? 'boundary' : 'normal';
+      CONFIG.FILL_VALIDATION_MODE = ['normal', 'boundary', 'invalid'].includes(settings.validationMode.value)
+        ? settings.validationMode.value
+        : 'normal';
+      CONFIG.VALIDATE_AFTER_FILL = settings.validateAfterFill.checked;
+      CONFIG.REMOTE_OPTION_RETRY_COUNT = getBoundedConfigNumber(settings.optionRetries.value, 4, 0, 10);
+      CONFIG.REMOTE_OPTION_RETRY_DELAY_MS = getBoundedConfigNumber(settings.optionDelay.value, 250, 50, 2000);
+      CONFIG.DYNAMIC_FILL_WINDOW_MS = getBoundedConfigNumber(settings.dynamicWindow.value, 8000, 1000, 60000);
+      CONFIG.DYNAMIC_FILL_MAX_DIALOG_STEPS = getBoundedConfigNumber(settings.dialogSteps.value, 3, 1, 10);
       CONFIG.DEEPSEEK_API_URL = settings.apiUrl.value.trim() || 'https://api.deepseek.com/v1/chat/completions';
       CONFIG.DEEPSEEK_API_MODEL = settings.apiModel.value.trim() || 'deepseek-v4-flash';
       const nextApiKey = settings.apiKey.value.trim();
@@ -1780,6 +2927,7 @@
 
   if (typeof GM_registerMenuCommand !== 'undefined') {
     GM_registerMenuCommand('⚙️ 高级偏好设置', openSettingsUI);
+    GM_registerMenuCommand('↶ 撤销最近一次填充', undoLastFillOperation);
   }
 
 })();
