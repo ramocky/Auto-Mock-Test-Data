@@ -4,6 +4,8 @@ document.addEventListener('DOMContentLoaded', () => {
     SHORTCUT_FILL_ALL: 'z',
     SHORTCUT_AI_TRIGGER: 's',
     AI_MANUAL_TRIGGER_MODE: true,
+    AI_ENABLE_CLASSIFICATION: true,
+    AI_ENABLE_PRELOAD: true,
     IGNORE_KEYWORDS: ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'],
     CUSTOM_DICTS: [],
     DEEPSEEK_API_URL: 'https://api.deepseek.com/v1/chat/completions',
@@ -24,6 +26,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const inputAiTrigger = document.getElementById('shortcutAiTrigger');
   const customDictsEl = document.getElementById('customDicts');
   const aiManualTriggerModeEl = document.getElementById('aiManualTriggerMode');
+  const aiEnableClassificationEl = document.getElementById('aiEnableClassification');
+  const aiEnablePreloadEl = document.getElementById('aiEnablePreload');
   const deepseekApiUrlEl = document.getElementById('deepseekApiUrl');
   const deepseekApiModelEl = document.getElementById('deepseekApiModel');
   const deepseekApiKeyEl = document.getElementById('deepseekApiKey');
@@ -39,6 +43,8 @@ document.addEventListener('DOMContentLoaded', () => {
     inputAiTrigger.value = currentConfig.SHORTCUT_AI_TRIGGER.toUpperCase();
     customDictsEl.value = currentConfig.CUSTOM_DICTS ? JSON.stringify(currentConfig.CUSTOM_DICTS, null, 2) : '';
     aiManualTriggerModeEl.checked = currentConfig.AI_MANUAL_TRIGGER_MODE !== false;
+    aiEnableClassificationEl.checked = currentConfig.AI_ENABLE_CLASSIFICATION !== false;
+    aiEnablePreloadEl.checked = currentConfig.AI_ENABLE_PRELOAD !== false;
     deepseekApiUrlEl.value = currentConfig.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions';
     deepseekApiModelEl.value = currentConfig.DEEPSEEK_API_MODEL || 'deepseek-v4-flash';
     deepseekApiKeyEl.value = currentConfig.DEEPSEEK_API_KEY || '';
@@ -113,6 +119,8 @@ document.addEventListener('DOMContentLoaded', () => {
     currentConfig.IGNORE_KEYWORDS = currentKeywords;
     currentConfig.CUSTOM_DICTS = parsedDicts;
     currentConfig.AI_MANUAL_TRIGGER_MODE = aiManualTriggerModeEl.checked;
+    currentConfig.AI_ENABLE_CLASSIFICATION = aiEnableClassificationEl.checked;
+    currentConfig.AI_ENABLE_PRELOAD = aiEnablePreloadEl.checked;
     currentConfig.DEEPSEEK_API_URL = deepseekApiUrlEl.value.trim() || 'https://api.deepseek.com/v1/chat/completions';
     currentConfig.DEEPSEEK_API_MODEL = deepseekApiModelEl.value.trim() || 'deepseek-v4-flash';
     currentConfig.DEEPSEEK_API_KEY = deepseekApiKeyEl.value.trim();

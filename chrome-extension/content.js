@@ -20,8 +20,10 @@ if (!window._mockExtInjected) {
     configData.IGNORE_KEYWORDS = configData.IGNORE_KEYWORDS || defaultKeywords;
     configData.SHORTCUT_SPOTLIGHT = configData.SHORTCUT_SPOTLIGHT || 'x';
     configData.SHORTCUT_FILL_ALL = configData.SHORTCUT_FILL_ALL || 'z';
-    configData.SHORTCUT_AI_TRIGGER = configData.SHORTCUT_AI_TRIGGER || 'a';
+    configData.SHORTCUT_AI_TRIGGER = configData.SHORTCUT_AI_TRIGGER || 's';
     if (typeof configData.AI_MANUAL_TRIGGER_MODE !== 'boolean') configData.AI_MANUAL_TRIGGER_MODE = true;
+    if (typeof configData.AI_ENABLE_CLASSIFICATION !== 'boolean') configData.AI_ENABLE_CLASSIFICATION = true;
+    if (typeof configData.AI_ENABLE_PRELOAD !== 'boolean') configData.AI_ENABLE_PRELOAD = true;
     configData.DEEPSEEK_API_URL = configData.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions';
     configData.DEEPSEEK_API_MODEL = configData.DEEPSEEK_API_MODEL || 'deepseek-v4-flash';
     configData.DEEPSEEK_API_KEY = configData.DEEPSEEK_API_KEY || '';

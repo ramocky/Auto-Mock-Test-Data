@@ -1,0 +1,34 @@
+# AI 助手与本地工作流状态
+.claude/
+.cunzhi-memory/
+.sisyphus/
+_bmad/
+_bmad-output/
+project_document/
+
+# AI 生成的项目索引文档（保留 README.md）
+CLAUDE.md
+**/CLAUDE.md
+AGENTS.md
+**/AGENTS.md
+GEMINI.md
+**/GEMINI.md
+
+# 本地编辑器与系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 日志、缓存与临时文件
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+node_modules/
+
+# 本地生成的发布产物
+/Auto-Mock-Extension.zip
