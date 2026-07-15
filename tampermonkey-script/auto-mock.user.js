@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      1.2.8
+// @version      1.3.0
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
@@ -27,7 +27,7 @@
     SHORTCUT_AI_TRIGGER: 's',
     AI_MANUAL_TRIGGER_MODE: true,
     AI_ENABLE_CLASSIFICATION: true,
-    AI_ENABLE_PRELOAD: true,
+    AI_ENABLE_PRELOAD: false,
     IGNORE_KEYWORDS: ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'],
     CUSTOM_DICTS: [],
     DEEPSEEK_API_URL: 'https://api.deepseek.com/v1/chat/completions',
@@ -41,6 +41,53 @@
   // ==========================================
   // 1. 高阶内置 Mock 数据工厂 (Mock Engine)
   // ==========================================
+  const ID_CARD_REGIONS = ['110101', '310101', '440101', '350203', '440304'];
+  const CREDIT_CODE_CHARS = '0123456789ABCDEFGHJKLMNPQRTUWXY';
+
+  function randomDigitString(length) {
+    let value = '';
+    for (let i = 0; i < length; i++) value += Math.floor(Math.random() * 10);
+    return value;
+  }
+
+  function randomBirthDateText() {
+    const start = new Date(1970, 0, 1).getTime();
+    const latest = new Date();
+    latest.setFullYear(latest.getFullYear() - 18);
+    const date = new Date(start + Math.floor(Math.random() * (latest.getTime() - start + 1)));
+    return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
+  }
+
+  function appendIdCardCheckDigit(body) {
+    const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+    const checkCodes = '10X98765432';
+    const sum = body.split('').reduce((total, digit, index) => total + Number(digit) * weights[index], 0);
+    return body + checkCodes[sum % 11];
+  }
+
+  function appendLuhnCheckDigit(body) {
+    let sum = 0;
+    let shouldDouble = true;
+    for (let i = body.length - 1; i >= 0; i--) {
+      let digit = Number(body[i]);
+      if (shouldDouble) {
+        digit *= 2;
+        if (digit > 9) digit -= 9;
+      }
+      sum += digit;
+      shouldDouble = !shouldDouble;
+    }
+    return body + ((10 - (sum % 10)) % 10);
+  }
+
+  function appendCreditCodeCheckDigit(body) {
+    const weights = [1, 3, 9, 27, 19, 26, 16, 17, 20, 29, 25, 13, 8, 24, 10, 30, 28];
+    const sum = body.split('').reduce((total, char, index) => {
+      return total + CREDIT_CODE_CHARS.indexOf(char) * weights[index];
+    }, 0);
+    return body + CREDIT_CODE_CHARS[(31 - (sum % 31)) % 31];
+  }
+
   const MockFactory = {
     name: () => {
       const familyNames = "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳酆鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆萧尹姚邵湛汪祁毛禹狄米贝明臧计伏成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季麻强贾路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯昝管卢莫经房裘缪干解应宗丁宣贲邓郁单杭洪包诸左石崔吉钮龚程嵇邢滑裴陆荣翁荀羊於惠甄曲家封芮羿储靳汲邴糜松井段富巫乌焦巴弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘钭厉戎祖武符刘景詹束龙叶幸司韶郜黎蓟薄印宿白怀蒲邰从鄂索咸籍赖卓蔺屠蒙池乔阴鬱胥能苍双闻莘党翟谭贡劳逄姬申扶堵冉宰郦雍卻璩桑桂濮牛寿通边扈燕冀郏浦尚农温别庄晏柴瞿阎充慕连茹习宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙东欧殳沃利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋沙乜养鞠须丰巢关蒯相查后荆红游竺权逯盖益强贾路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯昝管卢莫经房裘缪干解应宗丁宣贲邓郁单杭洪包诸左石崔吉钮龚程嵇邢滑裴陆荣翁荀羊於惠甄曲家封芮羿储靳汲邴糜松井段富巫乌焦巴弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘钭厉戎祖武符刘景詹束龙叶幸司韶郜黎蓟薄印宿白怀蒲邰从鄂索咸籍赖卓蔺屠蒙池乔阴鬱胥能苍双闻莘党翟谭贡劳逄姬申扶堵冉宰郦雍卻璩桑桂濮牛寿通边扈燕冀郏浦尚农温别庄晏柴瞿阎充慕连茹习宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙东欧殳沃利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋沙乜养鞠须丰巢关蒯相查后荆红游竺权逯盖益桓公万俟司马上官欧阳夏侯诸葛闻人东方赫连皇甫尉迟公羊澹台公冶宗政濮阳淳于单于太叔申屠公孙仲孙轩辕令狐钟离宇文长孙慕容鲜于闾丘司徒司空亓官司寇仉督子车颛孙端木巫马公西漆雕乐正壤驷公良拓跋夹谷宰父谷梁晋楚阎法汝鄢涂钦段干百里东郭南门呼延归海羊舌微生岳帅缑亢况郈有琴梁丘左丘东门西门商牟佘佴伯赏南宫墨哈谯笪年爱阳佟第五言福";
@@ -57,16 +104,14 @@
       return Math.random().toString(36).substring(2, 10) + domains[Math.floor(Math.random() * domains.length)];
     },
     idcard: () => {
-      const region = ['110101','310101','440101','350203','440304'];
-      const date = `19${Math.floor(Math.random() * 30 + 70)}${String(Math.floor(Math.random() * 11 + 1)).padStart(2, '0')}${String(Math.floor(Math.random() * 27 + 1)).padStart(2, '0')}`;
-      const suffix = Math.floor(Math.random() * 9000 + 1000).toString();
-      return region[Math.floor(Math.random() * region.length)] + date + suffix;
+      const region = ID_CARD_REGIONS[Math.floor(Math.random() * ID_CARD_REGIONS.length)];
+      const sequence = String(Math.floor(Math.random() * 999) + 1).padStart(3, '0');
+      return appendIdCardCheckDigit(region + randomBirthDateText() + sequence);
     },
     bankCard: () => {
-      const len = Math.random() > 0.5 ? 14 : 17;
-      let card = '62';
-      for(let i=0; i<len; i++) card += Math.floor(Math.random() * 10);
-      return card;
+      const totalLength = 16 + Math.floor(Math.random() * 4);
+      const body = '62' + randomDigitString(totalLength - 3);
+      return appendLuhnCheckDigit(body);
     },
     title: () => {
       const titles = ['总经理', '副总经理', '研发总监', '产品经理', '项目经理', '资深开发工程师', '视觉设计师', '财务专员', '人事主管', '销售代表', '渠道总监', '大区经理'];
@@ -98,10 +143,12 @@
       return texts[Math.floor(Math.random() * texts.length)] + Math.floor(Math.random() * 1000);
     },
     creditCode: () => {
-      const chars = "0123456789ABCDEFGHJKLMNPQRTUWXY";
-      let code = "91" + ['11','31','44','35','33'][Math.floor(Math.random() * 5)] + "0100M" + (Math.random().toString(36).substring(2, 11).toUpperCase());
-      while(code.length < 18) code += chars.charAt(Math.floor(Math.random() * chars.length));
-      return code.substring(0, 18);
+      const region = ID_CARD_REGIONS[Math.floor(Math.random() * ID_CARD_REGIONS.length)];
+      let organizationCode = '';
+      for (let i = 0; i < 9; i++) {
+        organizationCode += CREDIT_CODE_CHARS[Math.floor(Math.random() * CREDIT_CODE_CHARS.length)];
+      }
+      return appendCreditCodeCheckDigit('91' + region + organizationCode);
     },
     company: () => {
       const cities = ['北京', '上海', '广州', '深圳', '杭州', '厦门', '成都', '武汉'];
@@ -523,8 +570,19 @@
   }
 
   // === DeepSeek 通信核心 ===
+  const AI_REQUEST_TIMEOUT_MS = 15000;
+  const DEEPSEEK_CACHE_LIMIT = 100;
   const deepseekCache = new Map();
   const deepseekPendingRequests = new Map();
+
+  function cacheDeepSeekResult(promptKey, value) {
+    if (deepseekCache.has(promptKey)) deepseekCache.delete(promptKey);
+    deepseekCache.set(promptKey, value);
+    while (deepseekCache.size > DEEPSEEK_CACHE_LIMIT) {
+      const oldestKey = deepseekCache.keys().next().value;
+      deepseekCache.delete(oldestKey);
+    }
+  }
 
   function isOfficialDeepSeekApi(url) {
     return typeof url === 'string' && /^https:\/\/api\.deepseek\.com\//i.test(url);
@@ -552,13 +610,20 @@
 
   function askDeepSeek(label, promptText, systemPrompt) {
     return new Promise((resolve) => {
-      if (!CONFIG.DEEPSEEK_API_KEY) return resolve(null);
+      let settled = false;
+      const settle = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+
+      if (!CONFIG.DEEPSEEK_API_KEY) return settle(null);
       if (typeof GM_xmlhttpRequest === 'undefined') {
         console.error("[AutoMock AI] 当前环境不支持 GM_xmlhttpRequest，无法发起跨域大模型请求。");
-        return resolve({ error: "由于环境限制 (非原生油猴)，无法发起跨域请求。" });
+        return settle({ error: "由于环境限制 (非原生油猴)，无法发起跨域请求。" });
       }
       const promptKey = promptText || label;
-      if (deepseekCache.has(promptKey)) return resolve(deepseekCache.get(promptKey));
+      if (deepseekCache.has(promptKey)) return settle(deepseekCache.get(promptKey));
       
       const requestUrl = CONFIG.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions';
       const requestBody = {
@@ -574,50 +639,63 @@
         requestBody.thinking = { type: "disabled" };
       }
 
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: requestUrl,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${CONFIG.DEEPSEEK_API_KEY}`
-        },
-        data: JSON.stringify(requestBody),
-        onload: function(res) {
-          if (res.status !== 200) {
-            console.error("[AutoMock AI] API Error:", res.status, res.responseText);
-            let errMsg = `HTTP ${res.status}`;
-            if (res.responseText) {
-              try {
-                let errData = JSON.parse(res.responseText);
-                if (errData.error && errData.error.message) errMsg += ": " + errData.error.message;
-              } catch(e) {}
+      try {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: requestUrl,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${CONFIG.DEEPSEEK_API_KEY}`
+          },
+          data: JSON.stringify(requestBody),
+          timeout: AI_REQUEST_TIMEOUT_MS,
+          onload: function(res) {
+            if (res.status < 200 || res.status >= 300) {
+              console.error("[AutoMock AI] API Error:", res.status, res.responseText);
+              let errMsg = `HTTP ${res.status}`;
+              if (res.responseText) {
+                try {
+                  const errData = JSON.parse(res.responseText);
+                  if (errData.error && errData.error.message) errMsg += ": " + errData.error.message;
+                } catch(e) {}
+              }
+              return settle({ error: errMsg });
             }
-            return resolve({ error: errMsg });
-          }
-          if (!res.responseText) {
-             console.error("DeepSeek Empty Response");
-             return resolve({ error: "服务器返回了空内容" });
-          }
-          try {
-            const data = JSON.parse(res.responseText);
-            const extracted = extractDeepSeekResult(data);
-            if (extracted.value) {
-              deepseekCache.set(promptKey, extracted.value);
-              resolve(extracted.value);
-            } else {
-              console.error("[AutoMock AI] 可填结果为空:", extracted.error, data);
-              resolve({ error: extracted.error });
+            if (!res.responseText) {
+              console.error("DeepSeek Empty Response");
+              return settle({ error: "服务器返回了空内容" });
             }
-          } catch(e) { 
-            console.error("[AutoMock AI] 解析响应失败:", e, res.responseText);
-            resolve({ error: "解析JSON异常: " + String(e) });
+            try {
+              const data = JSON.parse(res.responseText);
+              const extracted = extractDeepSeekResult(data);
+              if (extracted.value) {
+                cacheDeepSeekResult(promptKey, extracted.value);
+                settle(extracted.value);
+              } else {
+                console.error("[AutoMock AI] 可填结果为空:", extracted.error, data);
+                settle({ error: extracted.error });
+              }
+            } catch(e) {
+              console.error("[AutoMock AI] 解析响应失败:", e, res.responseText);
+              settle({ error: "解析JSON异常: " + String(e) });
+            }
+          },
+          onerror: function(err) {
+            console.error("[AutoMock AI] 网络请求失败:", err);
+            settle({ error: "网络请求失败，可能是跨域或服务无法访问" });
+          },
+          ontimeout: function() {
+            console.error(`[AutoMock AI] 请求超时 (${AI_REQUEST_TIMEOUT_MS}ms)`);
+            settle({ error: "AI 请求超时，请稍后重试" });
+          },
+          onabort: function() {
+            settle({ error: "AI 请求已取消" });
           }
-        },
-        onerror: function(err) { 
-          console.error("[AutoMock AI] 网络请求失败:", err);
-          resolve({ error: "网络请求失败，可能是跨域或服务无法访问" });
-        }
-      });
+        });
+      } catch (error) {
+        console.error("[AutoMock AI] 请求初始化失败:", error);
+        settle({ error: "AI 请求初始化失败: " + String(error) });
+      }
     });
   }
 
@@ -680,8 +758,71 @@
     '.el-radio__original',
     '.el-switch__input',
     'textarea',
-    'input:not([type="hidden"])'
+    'input:not([type="hidden"]):not([type="file"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="image"]):not([type="checkbox"]):not([type="radio"])'
   ];
+  const FIELD_INPUT_SELECTOR_TEXT = FIELD_INPUT_SELECTORS.join(', ');
+  const ACTIVE_DIALOG_SELECTORS = [
+    '.el-dialog__wrapper',
+    '.el-drawer__wrapper',
+    '.el-message-box__wrapper',
+    '.el-overlay-dialog',
+    '[role="dialog"]'
+  ];
+  const AUTO_MOCK_UI_SELECTOR = '#mock-ext-spotlight, #mock-ext-settings';
+
+  function isElementVisible(element) {
+    if (!element || !element.isConnected || typeof element.getClientRects !== 'function') return false;
+    const style = window.getComputedStyle(element);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') {
+      return false;
+    }
+    return element.getClientRects().length > 0;
+  }
+
+  function getEffectiveZIndex(element) {
+    let maxZIndex = 0;
+    let current = element;
+    while (current && current !== document.documentElement) {
+      const zIndex = Number.parseInt(window.getComputedStyle(current).zIndex, 10);
+      if (Number.isFinite(zIndex)) maxZIndex = Math.max(maxZIndex, zIndex);
+      current = current.parentElement;
+    }
+    return maxZIndex;
+  }
+
+  function getActiveDialogRoot() {
+    const candidates = Array.from(document.querySelectorAll(ACTIVE_DIALOG_SELECTORS.join(', ')))
+      .filter(root => isElementVisible(root) && root.querySelector(FIELD_INPUT_SELECTOR_TEXT));
+
+    return candidates.reduce((activeRoot, candidate) => {
+      if (!activeRoot) return candidate;
+      const activeZIndex = getEffectiveZIndex(activeRoot);
+      const candidateZIndex = getEffectiveZIndex(candidate);
+      if (candidateZIndex !== activeZIndex) {
+        return candidateZIndex > activeZIndex ? candidate : activeRoot;
+      }
+      return activeRoot.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING
+        ? candidate
+        : activeRoot;
+    }, null);
+  }
+
+  function isFieldVisible(input) {
+    if (isElementVisible(input)) return true;
+    const componentRoot = input.closest(FIELD_CONTAINER_SELECTORS);
+    return Boolean(componentRoot && isElementVisible(componentRoot));
+  }
+
+  function collectFillableInputs(root) {
+    const queryRoot = root && typeof root.querySelectorAll === 'function' ? root : document;
+    const seen = new Set();
+    return Array.from(queryRoot.querySelectorAll(FIELD_INPUT_SELECTOR_TEXT)).filter(input => {
+      if (seen.has(input)) return false;
+      seen.add(input);
+      if (input.closest(AUTO_MOCK_UI_SELECTOR)) return false;
+      return isFieldVisible(input);
+    });
+  }
 
   function isFormFieldInputElement(target) {
     return Boolean(target) && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
@@ -1107,6 +1248,7 @@
   }
 
   document.addEventListener('pointerover', (e) => {
+    if (!e.isTrusted) return;
     rememberLatestInteraction(e.target);
     const fieldElement = resolveMockFieldElement(e.target);
     if (!fieldElement) return;
@@ -1117,6 +1259,7 @@
 
   ['pointerdown', 'mousedown', 'click', 'focusin'].forEach((eventName) => {
     document.addEventListener(eventName, (e) => {
+      if (!e.isTrusted) return;
       rememberLatestInteraction(e.target);
       const fieldElement = resolveMockFieldElement(e.target);
       if (!fieldElement) return;
@@ -1397,39 +1540,11 @@
   }
 
   // ==========================================
-  // 5. 消息监听网关
+  // 5. 批量填充
   // ==========================================
-  window.addEventListener("message", (event) => {
-    if (event.source !== window) return;
-    if (event.data && event.data.type === "AUTO_MOCK_FILL") {
-      fillElementUiForms();
-    } else if (event.data && event.data.type === "TOGGLE_SPOTLIGHT") {
-      toggleSpotlight();
-    } else if (event.data && event.data.type === "INIT_MOCK_CONFIG") {
-      if (event.data.config) {
-        if (event.data.config.ignoreKeywords) CONFIG.IGNORE_KEYWORDS = event.data.config.ignoreKeywords;
-        if (event.data.config.shortcutSpotlight) CONFIG.SHORTCUT_SPOTLIGHT = event.data.config.shortcutSpotlight;
-        if (event.data.config.shortcutFill) CONFIG.SHORTCUT_FILL_ALL = event.data.config.shortcutFill;
-        if (event.data.config.shortcutAiTrigger) CONFIG.SHORTCUT_AI_TRIGGER = event.data.config.shortcutAiTrigger;
-        if (event.data.config.SHORTCUT_AI_TRIGGER) CONFIG.SHORTCUT_AI_TRIGGER = event.data.config.SHORTCUT_AI_TRIGGER;
-        if (typeof event.data.config.aiManualTriggerMode === 'boolean') CONFIG.AI_MANUAL_TRIGGER_MODE = event.data.config.aiManualTriggerMode;
-        if (typeof event.data.config.AI_MANUAL_TRIGGER_MODE === 'boolean') CONFIG.AI_MANUAL_TRIGGER_MODE = event.data.config.AI_MANUAL_TRIGGER_MODE;
-        if (typeof event.data.config.aiEnableClassification === 'boolean') CONFIG.AI_ENABLE_CLASSIFICATION = event.data.config.aiEnableClassification;
-        if (typeof event.data.config.AI_ENABLE_CLASSIFICATION === 'boolean') CONFIG.AI_ENABLE_CLASSIFICATION = event.data.config.AI_ENABLE_CLASSIFICATION;
-        if (typeof event.data.config.aiEnablePreload === 'boolean') CONFIG.AI_ENABLE_PRELOAD = event.data.config.aiEnablePreload;
-        if (typeof event.data.config.AI_ENABLE_PRELOAD === 'boolean') CONFIG.AI_ENABLE_PRELOAD = event.data.config.AI_ENABLE_PRELOAD;
-        if (typeof event.data.config.deepseekApiUrl === 'string') CONFIG.DEEPSEEK_API_URL = event.data.config.deepseekApiUrl;
-        if (typeof event.data.config.DEEPSEEK_API_URL === 'string') CONFIG.DEEPSEEK_API_URL = event.data.config.DEEPSEEK_API_URL;
-        if (typeof event.data.config.deepseekApiModel === 'string') CONFIG.DEEPSEEK_API_MODEL = event.data.config.deepseekApiModel;
-        if (typeof event.data.config.DEEPSEEK_API_MODEL === 'string') CONFIG.DEEPSEEK_API_MODEL = event.data.config.DEEPSEEK_API_MODEL;
-        if (typeof event.data.config.deepseekApiKey === 'string') CONFIG.DEEPSEEK_API_KEY = event.data.config.deepseekApiKey;
-        if (typeof event.data.config.DEEPSEEK_API_KEY === 'string') CONFIG.DEEPSEEK_API_KEY = event.data.config.DEEPSEEK_API_KEY;
-      }
-    }
-  }, false);
-
   async function fillElementUiForms() {
-    const inputs = Array.from(document.querySelectorAll('.el-input__inner, .el-textarea__inner'));
+    const activeDialogRoot = getActiveDialogRoot();
+    const inputs = collectFillableInputs(activeDialogRoot || document);
     let fillCount = 0;
     let skipCount = 0;
 
@@ -1489,6 +1604,7 @@
   // 6. 全局原生快捷键挂载 (摆脱浏览器底层限制)
   // ==========================================
   document.addEventListener('keydown', (e) => {
+    if (!e.isTrusted) return;
     if (e.altKey && e.key.toLowerCase() === CONFIG.SHORTCUT_SPOTLIGHT.toLowerCase()) {
       e.preventDefault();
       toggleSpotlight();
@@ -1525,56 +1641,60 @@
       
       <div style="margin-bottom: 15px;">
         <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">独立控制台唤醒快捷键 (Alt + ?)</label>
-        <input id="setting-spotlight" value="${CONFIG.SHORTCUT_SPOTLIGHT}" maxlength="1" style="width: 100%; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
+        <input id="setting-spotlight" maxlength="1" style="width: 100%; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
       </div>
       
       <div style="margin-bottom: 15px;">
         <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">一键全量填充快捷键 (Alt + ?)</label>
-        <input id="setting-fillall" value="${CONFIG.SHORTCUT_FILL_ALL}" maxlength="1" style="width: 100%; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
+        <input id="setting-fillall" maxlength="1" style="width: 100%; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
       </div>
 
       <div style="margin-bottom: 15px;">
         <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">AI 推荐类目快捷键 (Alt + ?)</label>
-        <input id="setting-ai-trigger" value="${CONFIG.SHORTCUT_AI_TRIGGER}" maxlength="1" style="width: 100%; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
+        <input id="setting-ai-trigger" maxlength="1" style="width: 100%; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
       </div>
 
       <div style="margin-bottom: 15px;">
         <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">一键填充拦截黑名单 (关键词用逗号分隔)</label>
-        <textarea id="setting-ignore" style="width: 100%; height: 60px; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; resize: none; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s; font-family: monospace;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'">${CONFIG.IGNORE_KEYWORDS.join(', ')}</textarea>
+        <textarea id="setting-ignore" style="width: 100%; height: 60px; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; resize: none; box-sizing: border-box; font-size: 14px; outline: none; transition: border-color .2s; font-family: monospace;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"></textarea>
       </div>
 
       <div style="margin-bottom: 15px;">
         <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">🔧 自定义扩展数据字典 (JSON 数组)</label>
-        <textarea id="setting-dicts" style="width: 100%; height: 80px; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; resize: none; box-sizing: border-box; font-size: 13px; outline: none; transition: border-color .2s; font-family: monospace;" placeholder='[\n  { "label": "测试账号", "regex": "账号|account", "values": ["test01", "test02"] }\n]' onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'">${CONFIG.CUSTOM_DICTS && CONFIG.CUSTOM_DICTS.length > 0 ? JSON.stringify(CONFIG.CUSTOM_DICTS, null, 2) : ''}</textarea>
+        <textarea id="setting-dicts" style="width: 100%; height: 80px; padding: 10px; border: 1px solid #dcdfe6; border-radius: 4px; resize: none; box-sizing: border-box; font-size: 13px; outline: none; transition: border-color .2s; font-family: monospace;" placeholder='[\n  { "label": "测试账号", "regex": "账号|account", "values": ["test01", "test02"] }\n]' onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"></textarea>
       </div>
 
       <div style="margin-bottom: 24px;">
         <label style="display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: #606266;">🤖 大模型智能交互 (兼容 OpenAI 格式)</label>
-        <div class="help-text" style="font-size:12px;color:#909399;margin-bottom:6px;">只要是兼容 OpenAI 格式的 API 都能接入。默认填入 DeepSeek 配置。清空 Key 即可关闭此功能。</div>
+        <div class="help-text" style="font-size:12px;color:#909399;margin-bottom:6px;">只要是兼容 OpenAI 格式的 API 都能接入。Key 留空表示保持现有值，勾选清除后关闭 AI。</div>
         <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#606266; margin-bottom:10px;">
-          <input type="checkbox" id="setting-ai-manual-mode" ${CONFIG.AI_MANUAL_TRIGGER_MODE !== false ? 'checked' : ''}/>
+          <input type="checkbox" id="setting-ai-manual-mode"/>
           保留 AI 推荐快捷键（选中字段后，按快捷键刷新当前字段推荐类目）
         </label>
         <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#606266; margin-bottom:10px;">
-          <input type="checkbox" id="setting-ai-enable-classification" ${CONFIG.AI_ENABLE_CLASSIFICATION !== false ? 'checked' : ''}/>
+          <input type="checkbox" id="setting-ai-enable-classification"/>
           启用 AI 类目推荐；关闭后仅使用本地兜底推荐，不请求 AI，不消耗 Token
         </label>
         <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:#606266; margin-bottom:10px;">
-          <input type="checkbox" id="setting-ai-enable-preload" ${CONFIG.AI_ENABLE_PRELOAD !== false ? 'checked' : ''}/>
+          <input type="checkbox" id="setting-ai-enable-preload"/>
           启用 AI 预加载分类；关闭后仅在打开弹窗时按需请求 AI
         </label>
         <div style="display: flex; align-items: center; margin-bottom: 8px;">
           <span style="width: 100px; font-size: 13px; color: #606266;">API URL:</span>
-          <input type="text" id="setting-deepseek-url" value="${CONFIG.DEEPSEEK_API_URL || ''}" placeholder="https://api.deepseek.com/v1/chat/completions" style="flex:1; padding: 8px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 13px; outline: none;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
+          <input type="text" id="setting-deepseek-url" placeholder="https://api.deepseek.com/v1/chat/completions" style="flex:1; padding: 8px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 13px; outline: none;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
         </div>
         <div style="display: flex; align-items: center; margin-bottom: 8px;">
           <span style="width: 100px; font-size: 13px; color: #606266;">Model:</span>
-          <input type="text" id="setting-deepseek-model" value="${CONFIG.DEEPSEEK_API_MODEL || ''}" placeholder="deepseek-v4-flash" style="flex:1; padding: 8px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 13px; outline: none;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
+          <input type="text" id="setting-deepseek-model" placeholder="deepseek-v4-flash" style="flex:1; padding: 8px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 13px; outline: none;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
         </div>
         <div style="display: flex; align-items: center;">
           <span style="width: 100px; font-size: 13px; color: #606266;">API Key:</span>
-          <input type="password" id="setting-deepseek-key" value="${CONFIG.DEEPSEEK_API_KEY || ''}" placeholder="sk-..." style="flex:1; padding: 8px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 13px; outline: none;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
+          <input type="password" id="setting-deepseek-key" placeholder="sk-..." autocomplete="new-password" style="flex:1; padding: 8px; border: 1px solid #dcdfe6; border-radius: 4px; box-sizing: border-box; font-size: 13px; outline: none;" onfocus="this.style.borderColor='#409eff'" onblur="this.style.borderColor='#dcdfe6'"/>
         </div>
+        <label style="display:flex; align-items:center; gap:8px; margin:8px 0 0 100px; font-size:12px; color:#909399;">
+          <input type="checkbox" id="setting-clear-deepseek-key"/>
+          清除已保存的 API Key
+        </label>
       </div>
 
       <div style="display: flex; justify-content: flex-end; gap: 12px;">
@@ -1585,18 +1705,51 @@
     container.appendChild(panel);
     document.body.appendChild(container);
 
-    document.getElementById('setting-cancel').onclick = () => container.remove();
-    document.getElementById('setting-save').onclick = () => {
-      CONFIG.SHORTCUT_SPOTLIGHT = document.getElementById('setting-spotlight').value.toLowerCase() || 'x';
-      CONFIG.SHORTCUT_FILL_ALL = document.getElementById('setting-fillall').value.toLowerCase() || 'z';
-      CONFIG.SHORTCUT_AI_TRIGGER = document.getElementById('setting-ai-trigger').value.toLowerCase() || 's';
-      const ignores = document.getElementById('setting-ignore').value.split(',').map(s => s.trim()).filter(Boolean);
+    const settings = {
+      shortcutSpotlight: panel.querySelector('#setting-spotlight'),
+      shortcutFillAll: panel.querySelector('#setting-fillall'),
+      shortcutAiTrigger: panel.querySelector('#setting-ai-trigger'),
+      ignoreKeywords: panel.querySelector('#setting-ignore'),
+      customDicts: panel.querySelector('#setting-dicts'),
+      aiManualMode: panel.querySelector('#setting-ai-manual-mode'),
+      aiClassification: panel.querySelector('#setting-ai-enable-classification'),
+      aiPreload: panel.querySelector('#setting-ai-enable-preload'),
+      apiUrl: panel.querySelector('#setting-deepseek-url'),
+      apiModel: panel.querySelector('#setting-deepseek-model'),
+      apiKey: panel.querySelector('#setting-deepseek-key'),
+      clearApiKey: panel.querySelector('#setting-clear-deepseek-key'),
+      cancel: panel.querySelector('#setting-cancel'),
+      save: panel.querySelector('#setting-save')
+    };
+
+    settings.shortcutSpotlight.value = CONFIG.SHORTCUT_SPOTLIGHT || 'x';
+    settings.shortcutFillAll.value = CONFIG.SHORTCUT_FILL_ALL || 'z';
+    settings.shortcutAiTrigger.value = CONFIG.SHORTCUT_AI_TRIGGER || 's';
+    settings.ignoreKeywords.value = (Array.isArray(CONFIG.IGNORE_KEYWORDS) ? CONFIG.IGNORE_KEYWORDS : DEFAULT_CONFIG.IGNORE_KEYWORDS).join(', ');
+    settings.customDicts.value = Array.isArray(CONFIG.CUSTOM_DICTS) && CONFIG.CUSTOM_DICTS.length > 0
+      ? JSON.stringify(CONFIG.CUSTOM_DICTS, null, 2)
+      : '';
+    settings.aiManualMode.checked = CONFIG.AI_MANUAL_TRIGGER_MODE !== false;
+    settings.aiClassification.checked = CONFIG.AI_ENABLE_CLASSIFICATION !== false;
+    settings.aiPreload.checked = CONFIG.AI_ENABLE_PRELOAD === true;
+    settings.apiUrl.value = CONFIG.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions';
+    settings.apiModel.value = CONFIG.DEEPSEEK_API_MODEL || 'deepseek-v4-flash';
+    settings.apiKey.value = '';
+    settings.apiKey.placeholder = CONFIG.DEEPSEEK_API_KEY ? '已配置，留空保持不变' : 'sk-...';
+    settings.clearApiKey.disabled = !CONFIG.DEEPSEEK_API_KEY;
+
+    settings.cancel.onclick = () => container.remove();
+    settings.save.onclick = () => {
+      CONFIG.SHORTCUT_SPOTLIGHT = settings.shortcutSpotlight.value.toLowerCase() || 'x';
+      CONFIG.SHORTCUT_FILL_ALL = settings.shortcutFillAll.value.toLowerCase() || 'z';
+      CONFIG.SHORTCUT_AI_TRIGGER = settings.shortcutAiTrigger.value.toLowerCase() || 's';
+      const ignores = settings.ignoreKeywords.value.split(',').map(s => s.trim()).filter(Boolean);
       CONFIG.IGNORE_KEYWORDS = ignores.length ? ignores : DEFAULT_CONFIG.IGNORE_KEYWORDS;
-      CONFIG.AI_MANUAL_TRIGGER_MODE = document.getElementById('setting-ai-manual-mode').checked;
-      CONFIG.AI_ENABLE_CLASSIFICATION = document.getElementById('setting-ai-enable-classification').checked;
-      CONFIG.AI_ENABLE_PRELOAD = document.getElementById('setting-ai-enable-preload').checked;
+      CONFIG.AI_MANUAL_TRIGGER_MODE = settings.aiManualMode.checked;
+      CONFIG.AI_ENABLE_CLASSIFICATION = settings.aiClassification.checked;
+      CONFIG.AI_ENABLE_PRELOAD = settings.aiPreload.checked;
       
-      const dictText = document.getElementById('setting-dicts').value.trim();
+      const dictText = settings.customDicts.value.trim();
       let parsedDicts = [];
       if (dictText) {
         try {
@@ -1608,9 +1761,14 @@
         }
       }
       CONFIG.CUSTOM_DICTS = parsedDicts;
-      CONFIG.DEEPSEEK_API_URL = document.getElementById('setting-deepseek-url').value.trim() || 'https://api.deepseek.com/v1/chat/completions';
-      CONFIG.DEEPSEEK_API_MODEL = document.getElementById('setting-deepseek-model').value.trim() || 'deepseek-v4-flash';
-      CONFIG.DEEPSEEK_API_KEY = document.getElementById('setting-deepseek-key').value.trim();
+      CONFIG.DEEPSEEK_API_URL = settings.apiUrl.value.trim() || 'https://api.deepseek.com/v1/chat/completions';
+      CONFIG.DEEPSEEK_API_MODEL = settings.apiModel.value.trim() || 'deepseek-v4-flash';
+      const nextApiKey = settings.apiKey.value.trim();
+      if (settings.clearApiKey.checked) {
+        CONFIG.DEEPSEEK_API_KEY = '';
+      } else if (nextApiKey) {
+        CONFIG.DEEPSEEK_API_KEY = nextApiKey;
+      }
 
       if (typeof GM_setValue !== 'undefined') {
         GM_setValue('auto_mock_config', CONFIG);
