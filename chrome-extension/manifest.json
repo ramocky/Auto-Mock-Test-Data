@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Auto Mock Test Data",
-  "version": "2.0.0",
+  "version": "2.0.4",
   "description": "自动填充表单测试数据，支持 Element UI",
   "icons": {
     "128": "logo.png"

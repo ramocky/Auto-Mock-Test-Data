@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { padding: 24px; font-family: sans-serif; }
+    .el-form-item { margin: 12px 0; }
+    .el-form-item__label { display: block; margin-bottom: 4px; }
+    .el-input__inner { min-height: 32px; }
+    .el-select-dropdown { display: none; border: 1px solid #ddd; background: white; padding: 4px; }
+    .el-select-dropdown.visible { display: block; }
+    .el-select-dropdown__item { padding: 6px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="el-form-item">
+    <label class="el-form-item__label">上级</label>
+    <div class="el-select" id="parent-select"><input id="parent" class="el-input__inner" type="text" readonly placeholder="请选择"></div>
+  </div>
+  <div class="el-form-item">
+    <label class="el-form-item__label">所属上级</label>
+    <div class="el-select" id="child-select"><input id="child" class="el-input__inner" type="text" placeholder="请输入关键词在选择"></div>
+  </div>
+  <div id="dropdown" class="el-select-dropdown"></div>
+  <pre id="result"></pre>
+  <script>
+    window.__menus = {};
+    window.GM_getValue = (_, fallback) => fallback;
+    window.GM_setValue = () => {};
+    window.GM_registerMenuCommand = (name, callback) => { window.__menus[name] = callback; };
+    window.GM_xmlhttpRequest = () => {};
+    window.alert = () => {};
+
+    const parent = document.getElementById('parent');
+    const child = document.getElementById('child');
+    const dropdown = document.getElementById('dropdown');
+    const renderOptions = (items, target) => {
+      dropdown.replaceChildren(...items.map(item => {
+        const option = document.createElement('div');
+        option.className = 'el-select-dropdown__item';
+        option.textContent = item;
+        option.addEventListener('click', () => { target.value = item; dropdown.classList.remove('visible'); });
+        return option;
+      }));
+      dropdown.classList.toggle('visible', items.length > 0);
+    };
+    document.getElementById('parent-select').addEventListener('click', () => renderOptions(['服务商'], parent));
+    document.getElementById('child-select').addEventListener('click', () => renderOptions([], child));
+    child.addEventListener('input', () => {
+      if (parent.value === '服务商' && child.value === '服务商') renderOptions(['服务商测试上级'], child);
+    });
+  </script>
+  <script src="./auto-mock.user.js"></script>
+  <script>
+    window.addEventListener('load', () => {
+      window.__menus['⚡ 一键填充当前表单']();
+      setTimeout(() => {
+        const result = {
+          parent: document.getElementById('parent').value,
+          child: document.getElementById('child').value
+        };
+        result.pass = result.parent === '服务商' && result.child === '服务商测试上级';
+        document.getElementById('result').textContent = JSON.stringify(result, null, 2);
+      }, 1800);
+    });
+  </script>
+</body>
+</html>

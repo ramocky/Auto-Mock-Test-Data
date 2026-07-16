@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      2.0.1
+// @version      2.0.4
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
@@ -292,6 +292,7 @@
       random,
       baseDate,
       boundaryIndex: 0,
+      filledFieldValues: [],
       handledFieldElements: new WeakSet(),
       handledDialogRoots: new WeakSet(),
       dialogStep: 0,
@@ -580,6 +581,30 @@
 
   function getEffectiveOptionSkipKeywords() {
     return [...SELECT_SKIP_KEYWORDS, ...getRuleStringList('optionSkipKeywords')];
+  }
+
+  function isAutoMockSkippedField(inputEl, labelText, vModelExpr) {
+    if (!inputEl) return true;
+    if (
+      inputEl.disabled ||
+      inputEl.hasAttribute('disabled') ||
+      inputEl.getAttribute('aria-disabled') === 'true' ||
+      inputEl.hasAttribute('data-auto-mock-skip') ||
+      inputEl.closest('[data-auto-mock-skip], .is-disabled, .disabled, [disabled], [aria-disabled="true"]')
+    ) return true;
+
+    const fieldText = [
+      labelText,
+      vModelExpr,
+      inputEl.name,
+      inputEl.id,
+      inputEl.placeholder,
+      inputEl.getAttribute('aria-label')
+    ].filter(Boolean).join(' ').toLowerCase();
+    return getEffectiveIgnoreKeywords().some(keyword => {
+      const normalizedKeyword = String(keyword == null ? '' : keyword).trim().toLowerCase();
+      return normalizedKeyword && fieldText.includes(normalizedKeyword);
+    });
   }
 
   function applySiteFieldAlias(labelText) {
@@ -1096,6 +1121,7 @@
   let spotlightPreloadTimer = null;
   let latestPreloadPromptKey = '';
   let latestPreloadTriggerType = '';
+  let spotlightKeydownHandler = null;
   let deferredDialogObserver = null;
   let deferredDialogTimer = null;
   let deferredDialogDebounce = null;
@@ -1593,9 +1619,8 @@
     if (!isFormFieldElement(inputEl)) return null;
 
     const vueInstance = getVueInstance(inputEl);
-    const isNativeDisabled = inputEl.disabled || inputEl.hasAttribute('disabled') || inputEl.closest('.is-disabled');
     const isVueDisabled = vueInstance && (vueInstance.disabled || vueInstance.inputDisabled || vueInstance.selectDisabled);
-    if (isNativeDisabled || isVueDisabled) return null;
+    if (isVueDisabled) return null;
 
     const componentName = getVueComponentName(vueInstance);
     const fieldKind = getFieldKind(inputEl);
@@ -1608,14 +1633,7 @@
       vModelExpr = vueInstance.$vnode.data.model.expression || '';
     }
 
-    const ignoreList = getEffectiveIgnoreKeywords();
-    const labelLower = labelText.toLowerCase();
-    const modelLower = vModelExpr.toLowerCase();
-    const isIgnored = ignoreList.some(keyword => {
-      const kw = String(keyword == null ? '' : keyword).toLowerCase();
-      return kw && (labelLower.includes(kw) || (modelLower && modelLower.includes(kw)));
-    });
-    if (isIgnored) return null;
+    if (isAutoMockSkippedField(inputEl, labelText, vModelExpr)) return null;
 
     const hookAction = createHookFillAction(vueInstance, componentName, labelText);
     return {
@@ -1656,7 +1674,7 @@
   function isSafeOptionElement(element) {
     if (!element || !isElementVisible(element)) return false;
     if (element.disabled || element.getAttribute('aria-disabled') === 'true') return false;
-    if (element.closest('.is-disabled, .disabled, [disabled], [aria-disabled="true"]')) return false;
+    if (element.closest('.is-disabled, .disabled, [disabled], [aria-disabled="true"], optgroup[disabled]')) return false;
     const text = normalizeOptionText(element.innerText || element.textContent);
     return Boolean(text) && !getEffectiveOptionSkipKeywords().some(keyword => text.includes(keyword));
   }
@@ -1680,11 +1698,16 @@
     return Math.min(maximum, Math.max(minimum, parsed));
   }
 
-  async function chooseDomOption(inputEl, session) {
+  async function chooseDomOption(inputEl, session, labelText) {
     const wrapper = inputEl.closest('.el-select, .el-select-v2, .el-cascader, .el-tree-select, .ant-select, .ant-cascader, [role="combobox"]') || inputEl;
+    const originalValue = getCurrentFieldValue(inputEl);
+    const cascadeSearchValue = getCascadeSearchValue(inputEl, labelText, session);
     wrapper.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     wrapper.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     if (typeof inputEl.focus === 'function') inputEl.focus();
+    const usedCascadeSearch = cascadeSearchValue && cascadeSearchValue !== originalValue
+      ? applyRemoteSearchQuery(inputEl, cascadeSearchValue)
+      : false;
     const retryCount = getBoundedConfigNumber(CONFIG.REMOTE_OPTION_RETRY_COUNT, 4, 0, 10);
     const retryDelay = getBoundedConfigNumber(CONFIG.REMOTE_OPTION_RETRY_DELAY_MS, 250, 50, 2000);
 
@@ -1696,15 +1719,18 @@
       option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
       option.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
       option.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await waitForRender(0);
       return true;
     }
+    if (usedCascadeSearch) applyRemoteSearchQuery(inputEl, originalValue);
     return false;
   }
 
   function chooseNativeSelect(inputEl, session) {
     const options = Array.from(inputEl.options || []).filter(option => {
       const text = normalizeOptionText(option.textContent || option.label || option.value);
-      return !option.disabled && option.value !== '' && !getEffectiveOptionSkipKeywords().some(keyword => text.includes(keyword));
+      const isDisabled = option.disabled || option.getAttribute('aria-disabled') === 'true' || option.parentElement?.disabled || option.closest('optgroup[disabled]');
+      return !isDisabled && option.value !== '' && !getEffectiveOptionSkipKeywords().some(keyword => text.includes(keyword));
     });
     if (!options.length) return false;
 
@@ -1739,6 +1765,107 @@
   function getAssociationKey(inputEl, labelText) {
     const raw = String(labelText || inputEl.name || inputEl.id || '').toLowerCase();
     return raw.replace(/确认|再次|重复|重新|confirm|repeat|again|\s|[_-]/g, '');
+  }
+
+  function normalizeFieldRelationKey(value) {
+    return String(value == null ? '' : value)
+      .toLowerCase()
+      .replace(/[\s_\-:：*（()）\[\]【】]/g, '');
+  }
+
+  function getFieldRelationKeys(inputEl, labelText) {
+    const values = [
+      labelText,
+      inputEl && inputEl.name,
+      inputEl && inputEl.id,
+      inputEl && inputEl.getAttribute && inputEl.getAttribute('aria-label')
+    ];
+    return [...new Set(values.map(normalizeFieldRelationKey).filter(Boolean))];
+  }
+
+  function getCascadeDependencyKeys(inputEl, labelText) {
+    const relationPrefixes = ['所属', '归属', '关联', '对应', '上级', '父级', '上层', '父节点', '父目录'];
+    const dependencyKeys = new Set();
+
+    getFieldRelationKeys(inputEl, labelText).forEach(key => {
+      let remainder = key;
+      let changed = false;
+      while (remainder) {
+        const prefix = relationPrefixes.find(item => remainder.startsWith(item));
+        if (!prefix) break;
+        remainder = remainder.slice(prefix.length);
+        changed = true;
+        if (remainder) dependencyKeys.add(remainder);
+      }
+      if (changed && remainder) dependencyKeys.add(remainder);
+    });
+
+    return [...dependencyKeys];
+  }
+
+  function orderFieldsByCascadeDependency(fields) {
+    const fieldMeta = fields.map((field, index) => {
+      const vueInstance = getVueInstance(field.inputEl);
+      const labelText = getLabelForInput(field.inputEl, vueInstance);
+      return {
+        field,
+        index,
+        keys: getFieldRelationKeys(field.inputEl, labelText),
+        dependencyKeys: getCascadeDependencyKeys(field.inputEl, labelText),
+        depth: 0
+      };
+    });
+
+    for (let pass = 0; pass < fieldMeta.length; pass++) {
+      let changed = false;
+      fieldMeta.forEach(meta => {
+        const sources = fieldMeta.filter(candidate => (
+          candidate !== meta && candidate.keys.some(key => meta.dependencyKeys.includes(key))
+        ));
+        const nextDepth = sources.length
+          ? Math.max(...sources.map(source => source.depth)) + 1
+          : (meta.dependencyKeys.length ? 1 : 0);
+        if (nextDepth !== meta.depth) {
+          meta.depth = nextDepth;
+          changed = true;
+        }
+      });
+      if (!changed) break;
+    }
+
+    return fieldMeta
+      .sort((left, right) => left.depth - right.depth || left.index - right.index)
+      .map(meta => meta.field);
+  }
+
+  function rememberFilledFieldValue(session, inputEl) {
+    if (!session || !inputEl) return;
+    const value = getCurrentFieldValue(inputEl);
+    if (!value) return;
+    const labelText = getLabelForInput(inputEl, getVueInstance(inputEl));
+    const keys = getFieldRelationKeys(inputEl, labelText);
+    if (!keys.length) return;
+    session.filledFieldValues = (session.filledFieldValues || []).filter(item => item.inputEl !== inputEl);
+    session.filledFieldValues.push({ inputEl, keys, value });
+  }
+
+  function getCascadeSearchValue(inputEl, labelText, session) {
+    if (!session || !Array.isArray(session.filledFieldValues)) return '';
+    const dependencyKeys = getCascadeDependencyKeys(inputEl, labelText);
+    if (!dependencyKeys.length) return '';
+    for (let index = session.filledFieldValues.length - 1; index >= 0; index--) {
+      const item = session.filledFieldValues[index];
+      if (item.inputEl === inputEl || !item.value) continue;
+      if (item.keys.some(key => dependencyKeys.includes(key))) return String(item.value);
+    }
+    return '';
+  }
+
+  function applyRemoteSearchQuery(inputEl, query) {
+    if (!inputEl || inputEl.readOnly || inputEl.disabled || !setNativeProperty(inputEl, 'value', query)) return false;
+    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
   }
 
   function isConfirmationField(inputEl, labelText) {
@@ -1915,7 +2042,7 @@
       if (vueInstance && CustomHooks[componentName] && CustomHooks[componentName](vueInstance, labelText, session)) {
         return { status: 'filled' };
       }
-      return { status: await chooseDomOption(inputEl, session) ? 'filled' : 'skipped' };
+      return { status: await chooseDomOption(inputEl, session, labelText) ? 'filled' : 'skipped' };
     }
     if (vueInstance && CustomHooks[componentName] && !forcedCommand) {
       return { status: CustomHooks[componentName](vueInstance, labelText, session) ? 'filled' : 'skipped' };
@@ -2082,7 +2209,7 @@
     if (!container || container.style.display === 'none') {
       createSpotlightUI();
       container = document.getElementById('mock-ext-spotlight');
-      if (container) container.style.display = 'flex';
+      if (container) container.style.display = 'grid';
     }
     return container;
   }
@@ -2090,7 +2217,7 @@
   function refreshSpotlightRecommendations() {
     const context = resolveSpotlightContext();
     const container = ensureSpotlightVisible();
-    const panel = container ? container.querySelector('div') : null;
+    const panel = container ? container.querySelector('[data-role="spotlight-panel"]') : null;
     renderSpotlightByContext(panel, context);
   }
 
@@ -2123,32 +2250,20 @@
 
     const section = document.createElement('div');
     section.setAttribute('data-role', 'recommend-section');
+    section.className = 'mock-spotlight__recommendation';
 
     const sectionTitle = document.createElement('h3');
-    sectionTitle.innerText = options.titleText || (usedFallback ? '✨ 智能推荐 (本地回退)' : '✨ 智能推荐 (AI 匹配)');
-    sectionTitle.style.cssText = 'font-size: 13px; color: #909399; margin: 0 0 10px 0; padding-bottom: 6px; border-bottom: 1px solid #ebeef5; font-weight: 500;';
+    sectionTitle.innerText = options.titleText || (usedFallback ? '智能推荐 / 本地规则' : '智能推荐 / AI 匹配');
+    sectionTitle.className = 'mock-spotlight__section-title';
     section.appendChild(sectionTitle);
 
     const grid = document.createElement('div');
-    grid.style.cssText = 'display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 6px;';
+    grid.className = 'mock-spotlight__grid';
 
     items.forEach(item => {
       const btn = document.createElement('button');
       btn.innerText = item.label;
-      btn.style.cssText = `
-        padding: 10px 0;
-        background: #f0f9eb;
-        border: 1px solid #e1f3d8;
-        border-radius: 6px;
-        color: #67c23a;
-        font-size: 13px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: all 0.2s;
-        outline: none;
-      `;
-      btn.onmouseover = () => { btn.style.background = '#e1f3d8'; btn.style.color = '#67c23a'; btn.style.borderColor = '#c2e7b0'; };
-      btn.onmouseout = () => { btn.style.background = '#f0f9eb'; btn.style.color = '#67c23a'; btn.style.borderColor = '#e1f3d8'; };
+      btn.className = 'mock-spotlight__command mock-spotlight__command--recommended';
       btn.onclick = () => {
         executeSpotlightCommand(item.cmd);
         closeSpotlight();
@@ -2159,7 +2274,7 @@
     if (items.length === 0) {
       const empty = document.createElement('div');
       empty.innerText = options.emptyText || '当前字段暂未匹配到推荐类目，可直接从下方手动选择。';
-      empty.style.cssText = 'font-size: 12px; color: #909399; padding: 8px 0 2px 0;';
+      empty.className = 'mock-spotlight__empty';
       section.appendChild(empty);
     } else {
       section.appendChild(grid);
@@ -2167,150 +2282,164 @@
 
     const hint = document.createElement('div');
     hint.innerText = options.hintText || (usedFallback ? '当前为本地规则回退推荐。' : `按 ${getAiShortcutText()} 可刷新当前字段的 AI 推荐类目。`);
-    hint.style.cssText = 'font-size: 12px; color: #b0b3b8; margin-bottom: 8px;';
+    hint.className = 'mock-spotlight__hint';
     section.appendChild(hint);
 
     const loading = panel.querySelector('[data-role="recommend-loading"]');
     if (loading) loading.remove();
 
-    const title = panel.querySelector('[data-role="spotlight-title"]');
-    if (title) {
-      title.insertAdjacentElement('afterend', section);
-    } else {
-      panel.prepend(section);
-    }
+    const content = panel.querySelector('[data-role="spotlight-content"]') || panel;
+    content.prepend(section);
   }
 
   function createSpotlightUI() {
     let container = document.getElementById('mock-ext-spotlight');
     if (container) container.remove();
+    if (spotlightKeydownHandler) document.removeEventListener('keydown', spotlightKeydownHandler, true);
 
     container = document.createElement('div');
     container.id = 'mock-ext-spotlight';
-    container.style.cssText = `
-      position: fixed;
-      top: 0; left: 0; width: 100vw; height: 100vh;
-      background: rgba(0, 0, 0, 0.45);
-      z-index: 999999;
-      display: none;
-      justify-content: center;
-      align-items: center;
-    `;
+    container.setAttribute('role', 'dialog');
+    container.setAttribute('aria-modal', 'true');
+    container.setAttribute('aria-labelledby', 'mock-spotlight-title');
 
     const panel = document.createElement('div');
-    panel.style.cssText = `
-      width: 600px;
-      max-height: 80vh;
-      overflow-y: auto;
-      background: rgba(255, 255, 255, 0.98);
-      border-radius: 12px;
-      box-shadow: 0 20px 40px rgba(0,0,0,0.15);
-      padding: 24px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    `;
-    
-    // 自定义滚动条样式
-    const style = document.createElement('style');
-    style.innerHTML = `
-      #mock-ext-spotlight > div::-webkit-scrollbar { width: 6px; }
-      #mock-ext-spotlight > div::-webkit-scrollbar-thumb { background: #dcdfe6; border-radius: 3px; }
-      #mock-ext-spotlight > div::-webkit-scrollbar-thumb:hover { background: #c0c4cc; }
-    `;
-    document.head.appendChild(style);
-    
-    const title = document.createElement('div');
+    panel.setAttribute('data-role', 'spotlight-panel');
+    panel.className = 'mock-spotlight__panel';
+
+    let style = document.getElementById('mock-ext-spotlight-style');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'mock-ext-spotlight-style';
+      style.textContent = `
+        #mock-ext-spotlight { position: fixed; inset: 0; z-index: 2147483645; display: none; place-items: center; padding: 16px; box-sizing: border-box; background: rgba(15, 23, 42, 0.56); font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #172033; }
+        #mock-ext-spotlight .mock-spotlight__panel { display: flex; flex-direction: column; width: min(720px, calc(100vw - 32px)); max-height: min(760px, calc(100dvh - 32px)); overflow: hidden; border: 1px solid #cbd5e1; border-radius: 8px; background: #ffffff; box-shadow: 0 24px 56px rgba(15, 23, 42, 0.3); }
+        #mock-ext-spotlight .mock-spotlight__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid #dbe4ef; background: #f8fafc; }
+        #mock-ext-spotlight .mock-spotlight__eyebrow { margin: 0 0 4px; color: #2563c9; font-size: 12px; font-weight: 700; line-height: 1.3; }
+        #mock-ext-spotlight .mock-spotlight__title { margin: 0; color: #172033; font-size: 18px; font-weight: 700; line-height: 1.35; }
+        #mock-ext-spotlight .mock-spotlight__field { min-height: 18px; margin: 4px 0 0; color: #52617a; font-size: 13px; line-height: 1.45; }
+        #mock-ext-spotlight .mock-spotlight__close { display: grid; width: 40px; height: 40px; flex: 0 0 40px; place-items: center; border: 1px solid #bcc9d8; border-radius: 5px; background: #ffffff; color: #34445c; cursor: pointer; font-size: 24px; font-weight: 400; line-height: 1; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease; }
+        #mock-ext-spotlight .mock-spotlight__close:hover { border-color: #91a4bb; background: #edf3f9; color: #172033; }
+        #mock-ext-spotlight .mock-spotlight__content { min-height: 0; overflow-y: auto; padding: 18px 20px 22px; overscroll-behavior: contain; }
+        #mock-ext-spotlight .mock-spotlight__content::-webkit-scrollbar { width: 8px; }
+        #mock-ext-spotlight .mock-spotlight__content::-webkit-scrollbar-thumb { border: 2px solid #ffffff; border-radius: 999px; background: #a9b8cb; }
+        #mock-ext-spotlight .mock-spotlight__undo, #mock-ext-spotlight .mock-spotlight__loading, #mock-ext-spotlight .mock-spotlight__hint, #mock-ext-spotlight .mock-spotlight__empty { color: #52617a; font-size: 13px; line-height: 1.5; }
+        #mock-ext-spotlight .mock-spotlight__undo { margin-bottom: 14px; padding: 9px 11px; border-left: 3px solid #2563c9; background: #eff6ff; }
+        #mock-ext-spotlight .mock-spotlight__loading { padding: 10px 0; }
+        #mock-ext-spotlight .mock-spotlight__group, #mock-ext-spotlight .mock-spotlight__recommendation { margin-top: 20px; }
+        #mock-ext-spotlight .mock-spotlight__recommendation { margin-top: 0; padding: 14px; border: 1px solid #bfdbfe; border-radius: 6px; background: #f8fbff; }
+        #mock-ext-spotlight .mock-spotlight__section-title { margin: 0 0 10px; color: #253247; font-size: 13px; font-weight: 700; line-height: 1.4; }
+        #mock-ext-spotlight .mock-spotlight__grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+        #mock-ext-spotlight .mock-spotlight__command { min-height: 42px; overflow: hidden; border: 1px solid #cbd5e1; border-radius: 5px; background: #ffffff; color: #34445c; cursor: pointer; font: inherit; font-size: 13px; font-weight: 600; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, transform 180ms ease; }
+        #mock-ext-spotlight .mock-spotlight__command:hover { border-color: #74a3e7; background: #eff6ff; color: #174ea6; }
+        #mock-ext-spotlight .mock-spotlight__command:active { transform: translateY(1px); }
+        #mock-ext-spotlight .mock-spotlight__command--recommended { border-color: #93c5fd; background: #dbeafe; color: #174ea6; }
+        #mock-ext-spotlight .mock-spotlight__command--custom { border-color: #fdba74; background: #fff7ed; color: #9a3412; }
+        #mock-ext-spotlight .mock-spotlight__hint { margin: 10px 0 0; }
+        #mock-ext-spotlight button:focus-visible { outline: 3px solid rgba(37, 99, 201, 0.35); outline-offset: 2px; }
+        @media (max-width: 600px) { #mock-ext-spotlight { padding: 10px; } #mock-ext-spotlight .mock-spotlight__panel { width: min(100%, calc(100vw - 20px)); max-height: calc(100dvh - 20px); } #mock-ext-spotlight .mock-spotlight__header { padding: 16px; } #mock-ext-spotlight .mock-spotlight__content { padding: 16px; } #mock-ext-spotlight .mock-spotlight__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (prefers-reduced-motion: reduce) { #mock-ext-spotlight *, #mock-ext-spotlight *::before, #mock-ext-spotlight *::after { transition-duration: 0.01ms !important; scroll-behavior: auto !important; } }
+      `;
+      document.head.appendChild(style);
+    }
+
+    const header = document.createElement('header');
+    header.className = 'mock-spotlight__header';
+    const headerContent = document.createElement('div');
+    const eyebrow = document.createElement('p');
+    eyebrow.className = 'mock-spotlight__eyebrow';
+    eyebrow.textContent = 'AUTO MOCK';
+    headerContent.appendChild(eyebrow);
+    const title = document.createElement('h2');
     title.setAttribute('data-role', 'spotlight-title');
-    title.innerText = '⚡ 选择要填入的数据格式';
-    title.style.cssText = 'font-size: 16px; color: #333; margin-bottom: 20px; font-weight: bold; user-select: none; text-align: center;';
-    panel.appendChild(title);
+    title.id = 'mock-spotlight-title';
+    title.className = 'mock-spotlight__title';
+    title.innerText = '选择填充数据';
+    headerContent.appendChild(title);
+    const fieldLabel = document.createElement('p');
+    fieldLabel.setAttribute('data-role', 'spotlight-field');
+    fieldLabel.className = 'mock-spotlight__field';
+    fieldLabel.textContent = '请先选中要填充的字段';
+    headerContent.appendChild(fieldLabel);
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'mock-spotlight__close';
+    closeButton.setAttribute('aria-label', '关闭填充数据面板');
+    closeButton.title = '关闭';
+    closeButton.textContent = '×';
+    header.appendChild(headerContent);
+    header.appendChild(closeButton);
+    panel.appendChild(header);
+
+    const content = document.createElement('main');
+    content.setAttribute('data-role', 'spotlight-content');
+    content.className = 'mock-spotlight__content';
+    panel.appendChild(content);
 
     const undoStatus = document.createElement('div');
     undoStatus.setAttribute('data-role', 'spotlight-undo-status');
-    undoStatus.style.cssText = 'font-size:12px;color:#909399;margin:-12px 0 14px;text-align:center;';
-    panel.appendChild(undoStatus);
+    undoStatus.className = 'mock-spotlight__undo';
+    content.appendChild(undoStatus);
 
     const loadingHint = document.createElement('div');
     loadingHint.setAttribute('data-role', 'recommend-loading');
     loadingHint.innerText = '正在准备推荐区...';
-    loadingHint.style.cssText = 'font-size: 12px; color: #b0b3b8; margin: -8px 0 14px 0; text-align: center;';
-    panel.appendChild(loadingHint);
+    loadingHint.className = 'mock-spotlight__loading';
+    content.appendChild(loadingHint);
 
     const mockGroups = getBuiltInMockGroups();
 
     mockGroups.forEach(group => {
       const sectionTitle = document.createElement('h3');
-      sectionTitle.innerText = group.title;
-      sectionTitle.style.cssText = 'font-size: 13px; color: #909399; margin: 16px 0 10px 0; padding-bottom: 6px; border-bottom: 1px solid #ebeef5; font-weight: 500;';
-      panel.appendChild(sectionTitle);
+      sectionTitle.innerText = group.title.replace(/^[^\u4e00-\u9fa5A-Za-z0-9]+/, '');
+      sectionTitle.className = 'mock-spotlight__section-title';
 
       const grid = document.createElement('div');
-      grid.style.cssText = 'display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;';
+      grid.className = 'mock-spotlight__grid';
 
       group.items.forEach(item => {
         const btn = document.createElement('button');
         btn.innerText = item.label;
-        btn.style.cssText = `
-          padding: 10px 0;
-          background: ${group.isRecommended ? '#f0f9eb' : '#f4f6f8'};
-          border: 1px solid ${group.isRecommended ? '#e1f3d8' : '#e4e7ed'};
-          border-radius: 6px;
-          color: ${group.isRecommended ? '#67c23a' : '#606266'};
-          font-size: 13px;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.2s;
-          outline: none;
-        `;
-        if (group.isRecommended) {
-          btn.onmouseover = () => { btn.style.background = '#e1f3d8'; btn.style.color = '#67c23a'; btn.style.borderColor = '#c2e7b0'; };
-          btn.onmouseout = () => { btn.style.background = '#f0f9eb'; btn.style.color = '#67c23a'; btn.style.borderColor = '#e1f3d8'; };
-        } else {
-          btn.onmouseover = () => { btn.style.background = '#e6f1fc'; btn.style.color = '#409eff'; btn.style.borderColor = '#c6e2ff'; };
-          btn.onmouseout = () => { btn.style.background = '#f4f6f8'; btn.style.color = '#606266'; btn.style.borderColor = '#e4e7ed'; };
-        }
+        btn.className = group.isRecommended
+          ? 'mock-spotlight__command mock-spotlight__command--recommended'
+          : 'mock-spotlight__command';
         btn.onclick = () => {
           executeSpotlightCommand(item.cmd);
           closeSpotlight();
         };
         grid.appendChild(btn);
       });
-      panel.appendChild(grid);
+      const section = document.createElement('section');
+      section.className = 'mock-spotlight__group';
+      section.appendChild(sectionTitle);
+      section.appendChild(grid);
+      content.appendChild(section);
     });
 
     // 动态渲染自定义配置区
     if (CONFIG.CUSTOM_DICTS && CONFIG.CUSTOM_DICTS.length > 0) {
       const sectionTitle = document.createElement('h3');
-      sectionTitle.innerText = '🔧 自定义扩展数据';
-      sectionTitle.style.cssText = 'font-size: 13px; color: #909399; margin: 16px 0 10px 0; padding-bottom: 6px; border-bottom: 1px solid #ebeef5; font-weight: 500;';
-      panel.appendChild(sectionTitle);
+      sectionTitle.innerText = '自定义数据';
+      sectionTitle.className = 'mock-spotlight__section-title';
 
       const grid = document.createElement('div');
-      grid.style.cssText = 'display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;';
+      grid.className = 'mock-spotlight__grid';
 
       CONFIG.CUSTOM_DICTS.forEach((dict, index) => {
         const btn = document.createElement('button');
         btn.innerText = dict.label || ('自定义项' + (index + 1));
-        btn.style.cssText = `
-          padding: 10px 0;
-          background: #fdf6ec;
-          border: 1px solid #faecd8;
-          border-radius: 6px;
-          color: #e6a23c;
-          font-size: 13px;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.2s;
-          outline: none;
-        `;
-        btn.onmouseover = () => { btn.style.background = '#fef0f0'; btn.style.color = '#f56c6c'; btn.style.borderColor = '#fde2e2'; };
-        btn.onmouseout = () => { btn.style.background = '#fdf6ec'; btn.style.color = '#e6a23c'; btn.style.borderColor = '#faecd8'; };
+        btn.className = 'mock-spotlight__command mock-spotlight__command--custom';
         btn.onclick = () => {
           executeSpotlightCommand('__custom_' + index);
           closeSpotlight();
         };
         grid.appendChild(btn);
       });
-      panel.appendChild(grid);
+      const section = document.createElement('section');
+      section.className = 'mock-spotlight__group';
+      section.appendChild(sectionTitle);
+      section.appendChild(grid);
+      content.appendChild(section);
     }
 
     container.appendChild(panel);
@@ -2320,13 +2449,14 @@
     container.addEventListener('click', (e) => {
       if (e.target === container) closeSpotlight();
     });
+    closeButton.addEventListener('click', closeSpotlight);
 
-    // 监听 ESC 关闭
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && container.style.display === 'flex') {
+    spotlightKeydownHandler = (e) => {
+      if (e.key === 'Escape' && container.style.display === 'grid') {
         closeSpotlight();
       }
-    });
+    };
+    document.addEventListener('keydown', spotlightKeydownHandler, true);
   }
 
   function toggleSpotlight() {
@@ -2338,12 +2468,18 @@
 
     const context = resolveSpotlightContext();
     container = ensureSpotlightVisible();
-    const panel = container ? container.querySelector('div') : null;
+    const panel = container ? container.querySelector('[data-role="spotlight-panel"]') : null;
     const undoStatus = panel ? panel.querySelector('[data-role="spotlight-undo-status"]') : null;
+    const fieldLabel = panel ? panel.querySelector('[data-role="spotlight-field"]') : null;
+    if (fieldLabel) fieldLabel.textContent = context
+      ? `当前字段：${context.labelText || '未命名字段'}`
+      : '请先选中要填充的字段';
     if (undoStatus) undoStatus.textContent = lastFillOperation && lastFillOperation.snapshots.length
       ? `可撤销上次填充的 ${lastFillOperation.snapshots.length} 项字段`
       : '当前没有可撤销的填充操作';
     renderSpotlightByContext(panel, context);
+    const closeButton = panel ? panel.querySelector('.mock-spotlight__close') : null;
+    if (closeButton) requestAnimationFrame(() => closeButton.focus({ preventScroll: true }));
   }
 
   function closeSpotlight() {
@@ -2562,8 +2698,10 @@
     session.operation = operation;
     if (session.dynamicFillInProgress) return { total: 0, filled: 0, skipped: 0, failed: 0 };
 
-    const fields = collectFillableFields(activeDialogRoot || document)
-      .filter(field => !session.handledFieldElements.has(field.inputEl));
+    const fields = orderFieldsByCascadeDependency(
+      collectFillableFields(activeDialogRoot || document)
+        .filter(field => !session.handledFieldElements.has(field.inputEl))
+    );
     const result = { total: fields.length, filled: 0, skipped: 0, failed: 0 };
     session.dynamicFillInProgress = true;
 
@@ -2573,8 +2711,10 @@
         try {
           const snapshot = captureFieldSnapshot(fields[i].inputEl);
           const outcome = await fillField(fields[i].inputEl, session);
-          if (outcome.status === 'filled') result.filled++;
-          else result.skipped++;
+          if (outcome.status === 'filled') {
+            result.filled++;
+            rememberFilledFieldValue(session, fields[i].inputEl);
+          } else result.skipped++;
           recordOperationSnapshot(operation, snapshot, outcome);
           if (outcome.status === 'filled' || !shouldRetrySkippedField(fields[i].inputEl)) {
             session.handledFieldElements.add(fields[i].inputEl);
@@ -2622,7 +2762,7 @@
         refreshSpotlightRecommendations();
       }
     }
-  });
+  }, true);
 
   // ==========================================
   // 7. 偏好设置可视化面板 (Settings UI)
@@ -3240,6 +3380,7 @@
   }
 
   if (typeof GM_registerMenuCommand !== 'undefined') {
+    GM_registerMenuCommand('⚡ 一键填充当前表单', () => fillElementUiForms());
     GM_registerMenuCommand('⚙️ 高级偏好设置', openSettingsUI);
     GM_registerMenuCommand('↶ 撤销最近一次填充', undoLastFillOperation);
   }
