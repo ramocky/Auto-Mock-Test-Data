@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      2.0.1
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
@@ -1166,9 +1166,13 @@
     return maxZIndex;
   }
 
+  function hasBatchFillCandidate(root) {
+    return collectFillableInputs(root).some(input => Boolean(getFieldContext(input)));
+  }
+
   function getActiveDialogRoot() {
     const candidates = queryAllBySelectors(document, getEffectiveDialogSelectors())
-      .filter(root => isElementVisible(root) && queryAllBySelectors(root, getEffectiveInputSelectors()).length > 0);
+      .filter(root => isElementVisible(root) && hasBatchFillCandidate(root));
 
     return candidates.reduce((activeRoot, candidate) => {
       if (!activeRoot) return candidate;
@@ -2628,14 +2632,14 @@
     const container = document.createElement('div');
     container.id = 'mock-ext-settings';
     container.style.cssText = `
-      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-      background: rgba(0, 0, 0, 0.5); z-index: 9999999;
-      display: flex; justify-content: center; align-items: center;
+      position: fixed; inset: 0; width: 100vw; min-height: 100vh; height: 100dvh;
+      padding: 16px; background: rgba(15, 23, 42, 0.56); z-index: 2147483646;
+      display: grid; place-items: center; box-sizing: border-box;
     `;
     const panel = document.createElement('div');
     panel.style.cssText = `
-      width: 480px; max-height: calc(100vh - 40px); overflow-y: auto; background: #fff; border-radius: 12px; padding: 24px; box-sizing: border-box;
-      font-family: -apple-system, sans-serif; color: #333; box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+      width: min(680px, calc(100vw - 32px)); max-height: min(760px, calc(100dvh - 32px)); overflow: hidden; background: #fff; border: 1px solid #d9e1ec; border-radius: 8px; box-sizing: border-box;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1e293b; box-shadow: 0 24px 56px rgba(15, 23, 42, 0.28);
     `;
     panel.innerHTML = `
       <h2 style="margin: 0 0 20px 0; font-size: 18px; color: #2c3e50; font-weight: bold;">⚙️ 高级偏好设置</h2>
@@ -2768,8 +2772,281 @@
         <button id="setting-save" style="padding: 10px 20px; background: #409eff; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all .2s;" onmouseover="this.style.background='#66b1ff'" onmouseout="this.style.background='#409eff'">保存并应用</button>
       </div>
     `;
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-labelledby', 'mock-settings-title');
+    panel.tabIndex = -1;
     container.appendChild(panel);
     document.body.appendChild(container);
+
+    const style = document.createElement('style');
+    style.textContent = `
+      #mock-ext-settings .mock-settings__panel { display: grid; min-width: 0; grid-template-rows: auto minmax(0, 1fr) auto; }
+      #mock-ext-settings *, #mock-ext-settings *::before, #mock-ext-settings *::after { box-sizing: border-box; }
+      #mock-ext-settings .mock-settings__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px 24px 16px; border-bottom: 1px solid #e2e8f0; }
+      #mock-ext-settings .mock-settings__header > div { min-width: 0; }
+      #mock-ext-settings .mock-settings__title { margin: 0; color: #172033; font-size: 19px; font-weight: 650; line-height: 1.35; }
+      #mock-ext-settings .mock-settings__subtitle { max-width: 52ch; margin: 5px 0 0; color: #52617a; font-size: 14px; line-height: 1.55; }
+      #mock-ext-settings .mock-settings__close { width: 44px; height: 44px; flex: 0 0 44px; border: 0; border-radius: 6px; background: transparent; color: #52617a; cursor: pointer; font-size: 28px; font-weight: 300; line-height: 1; transition: background-color 180ms ease, color 180ms ease; }
+      #mock-ext-settings .mock-settings__close:hover { background: #eef3f8; color: #172033; }
+      #mock-ext-settings .mock-settings__body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 24px; }
+      #mock-ext-settings .mock-settings__section { padding: 22px 0; border-bottom: 1px solid #e7edf4; }
+      #mock-ext-settings .mock-settings__section:last-child { border-bottom: 0; }
+      #mock-ext-settings .mock-settings__section-heading { margin-bottom: 16px; }
+      #mock-ext-settings .mock-settings__section-title { margin: 0; color: #172033; font-size: 15px; font-weight: 650; line-height: 1.45; }
+      #mock-ext-settings .mock-settings__section-copy { margin: 4px 0 0; color: #60708a; font-size: 13px; line-height: 1.55; }
+      #mock-ext-settings .mock-settings__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+      #mock-ext-settings .mock-settings__field { display: grid; gap: 7px; color: #334155; font-size: 14px; font-weight: 600; line-height: 1.4; }
+      #mock-ext-settings .mock-settings__field--wide { grid-column: 1 / -1; }
+      #mock-ext-settings .mock-settings__field-note { color: #697a94; font-size: 12px; font-weight: 400; line-height: 1.45; }
+      #mock-ext-settings .mock-settings__control { width: 100%; min-height: 44px; border: 1px solid #bcc9d8; border-radius: 5px; background: #fff; color: #172033; padding: 9px 11px; font: inherit; font-weight: 400; line-height: 1.35; transition: border-color 180ms ease, box-shadow 180ms ease; }
+      #mock-ext-settings textarea.mock-settings__control { min-height: 96px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 13px; line-height: 1.55; }
+      #mock-ext-settings #setting-ignore { min-height: 76px; }
+      #mock-ext-settings #setting-site-rules { min-height: 208px; }
+      #mock-ext-settings input[type="checkbox"] { width: 18px; height: 18px; margin: 1px 0 0; flex: 0 0 18px; accent-color: #2563c9; }
+      #mock-ext-settings .mock-settings__control:focus-visible, #mock-ext-settings button:focus-visible, #mock-ext-settings input[type="checkbox"]:focus-visible { outline: 3px solid rgba(37, 99, 201, 0.28); outline-offset: 2px; border-color: #2563c9; }
+      #mock-ext-settings .mock-settings__control:focus { border-color: #2563c9; box-shadow: 0 0 0 3px rgba(37, 99, 201, 0.12); outline: 0; }
+      #mock-ext-settings .mock-settings__toggle { display: flex; align-items: flex-start; gap: 10px; color: #334155; cursor: pointer; font-size: 14px; line-height: 1.45; }
+      #mock-ext-settings .mock-settings__toggle + .mock-settings__toggle { margin-top: 11px; }
+      #mock-ext-settings .mock-settings__toggle strong { display: block; color: #253247; font-size: 14px; font-weight: 600; }
+      #mock-ext-settings .mock-settings__toggle small { display: block; margin-top: 2px; color: #697a94; font-size: 12px; line-height: 1.45; }
+      #mock-ext-settings .mock-settings__subsection { margin-top: 18px; padding-top: 18px; border-top: 1px solid #e7edf4; }
+      #mock-ext-settings .mock-settings__status { margin-bottom: 12px; color: #52617a; font-size: 13px; line-height: 1.5; }
+      #mock-ext-settings .mock-settings__actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+      #mock-ext-settings .mock-settings__button { min-height: 44px; border: 1px solid transparent; border-radius: 5px; padding: 0 15px; cursor: pointer; font: inherit; font-size: 14px; font-weight: 600; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, transform 180ms ease; }
+      #mock-ext-settings .mock-settings__button:active { transform: translateY(1px); }
+      #mock-ext-settings .mock-settings__button--secondary { border-color: #bcc9d8; background: #fff; color: #34445c; }
+      #mock-ext-settings .mock-settings__button--secondary:hover { background: #f4f7fb; border-color: #91a4bb; }
+      #mock-ext-settings .mock-settings__button--primary { background: #2563c9; color: #fff; }
+      #mock-ext-settings .mock-settings__button--primary:hover { background: #1f54ad; }
+      #mock-ext-settings .mock-settings__button:disabled { cursor: not-allowed; opacity: 0.5; }
+      #mock-ext-settings .mock-settings__footer { display: flex; min-width: 0; justify-content: flex-end; gap: 10px; padding: 16px 24px; border-top: 1px solid #e2e8f0; background: #f8fafc; }
+      @media (max-width: 600px) {
+        #mock-ext-settings { padding: 10px !important; }
+        #mock-ext-settings .mock-settings__header { padding: 18px 18px 15px; gap: 12px; }
+        #mock-ext-settings .mock-settings__body { padding: 0 18px; }
+        #mock-ext-settings .mock-settings__footer { padding: 14px 18px; }
+        #mock-ext-settings .mock-settings__grid { grid-template-columns: 1fr; }
+        #mock-ext-settings .mock-settings__field--wide { grid-column: auto; }
+        #mock-ext-settings .mock-settings__footer .mock-settings__button { flex: 1 1 0; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #mock-ext-settings *, #mock-ext-settings *::before, #mock-ext-settings *::after { transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+      }
+    `;
+    container.prepend(style);
+    panel.className = 'mock-settings__panel';
+
+    const heading = panel.querySelector('h2');
+    const body = document.createElement('div');
+    body.className = 'mock-settings__body';
+    const footer = panel.lastElementChild;
+    const originalContent = Array.from(panel.children).filter(child => child !== footer);
+    originalContent.forEach(child => body.appendChild(child));
+    panel.appendChild(body);
+    panel.appendChild(footer);
+
+    const header = document.createElement('header');
+    header.className = 'mock-settings__header';
+    const headerContent = document.createElement('div');
+    heading.removeAttribute('style');
+    heading.className = 'mock-settings__title';
+    heading.id = 'mock-settings-title';
+    heading.textContent = '高级偏好设置';
+    headerContent.appendChild(heading);
+    const subtitle = document.createElement('p');
+    subtitle.className = 'mock-settings__subtitle';
+    subtitle.textContent = '调整快捷键、填充策略、站点规则与 AI 推荐。保存后立即应用到当前页面。';
+    headerContent.appendChild(subtitle);
+    const close = document.createElement('button');
+    close.id = 'setting-close';
+    close.className = 'mock-settings__close';
+    close.type = 'button';
+    close.setAttribute('aria-label', '关闭高级偏好设置');
+    close.title = '关闭';
+    close.innerHTML = '&times;';
+    header.appendChild(headerContent);
+    header.appendChild(close);
+    panel.prepend(header);
+
+    footer.className = 'mock-settings__footer';
+    const sectionDefinitions = [
+      {
+        title: '快捷键与填充范围',
+        description: '单字符快捷键均与 Alt 组合使用，拦截词以逗号分隔。',
+        nodes: [
+          '#setting-spotlight',
+          '#setting-fillall',
+          '#setting-ai-trigger',
+          '#setting-ignore'
+        ]
+      },
+      {
+        title: '测试数据策略',
+        description: '选择生成数据的业务场景、边界策略与动态流程参数。',
+        nodes: [
+          '#setting-data-profile',
+          '#setting-random-seed',
+          '#setting-number-strategy',
+          '#setting-validation-mode',
+          '#setting-validate-after-fill',
+          '#setting-option-retries',
+          '#setting-option-delay',
+          '#setting-dynamic-window',
+          '#setting-dialog-steps'
+        ]
+      },
+      {
+        title: '站点适配规则',
+        description: '为当前或指定站点补充字段别名、选择器和忽略条件。',
+        nodes: ['#setting-site-rule-status', '#setting-site-rules', '#setting-import-site-rules', '#setting-export-site-rules']
+      },
+      {
+        title: '自定义数据字典',
+        description: '使用 JSON 数组扩展字段识别与候选测试数据。',
+        nodes: ['#setting-dicts']
+      },
+      {
+        title: 'AI 推荐',
+        description: '兼容 OpenAI 格式接口。API Key 留空会保留当前值。',
+        nodes: [
+          '#setting-ai-manual-mode',
+          '#setting-ai-enable-classification',
+          '#setting-ai-enable-preload',
+          '#setting-deepseek-url',
+          '#setting-deepseek-model',
+          '#setting-deepseek-key',
+          '#setting-clear-deepseek-key'
+        ]
+      }
+    ];
+
+    const fieldLabelMap = {
+      '#setting-spotlight': ['独立控制台', 'Alt + ?'],
+      '#setting-fillall': ['一键全量填充', 'Alt + ?'],
+      '#setting-ai-trigger': ['AI 推荐类目', 'Alt + ?'],
+      '#setting-ignore': ['一键填充拦截黑名单', '包含这些关键词的字段会被跳过。'],
+      '#setting-data-profile': ['业务类型'],
+      '#setting-random-seed': ['固定随机种子'],
+      '#setting-number-strategy': ['数值策略'],
+      '#setting-validation-mode': ['填充模式'],
+      '#setting-option-retries': ['下拉重试次数'],
+      '#setting-option-delay': ['重试间隔（ms）'],
+      '#setting-dynamic-window': ['动态窗口（ms）'],
+      '#setting-dialog-steps': ['后续弹窗层数'],
+      '#setting-site-rules': ['规则 JSON'],
+      '#setting-dicts': ['扩展字典 JSON'],
+      '#setting-deepseek-url': ['API URL'],
+      '#setting-deepseek-model': ['模型名称'],
+      '#setting-deepseek-key': ['API Key']
+    };
+
+    const toggleLabelMap = {
+      '#setting-validate-after-fill': ['填充后自动校验', '检查必填、格式、范围和组件错误态。'],
+      '#setting-ai-manual-mode': ['保留 AI 推荐快捷键', '选中字段后，通过快捷键刷新当前字段的推荐类目。'],
+      '#setting-ai-enable-classification': ['启用 AI 类目推荐', '关闭后仅使用本地兜底推荐，不会发起请求。'],
+      '#setting-ai-enable-preload': ['启用 AI 预加载分类', '关闭后仅在打开弹窗时按需请求。'],
+      '#setting-clear-deepseek-key': ['清除已保存的 API Key', '保存后关闭 AI 接口认证。']
+    };
+
+    const createSection = ({ title, description, nodes }, index) => {
+      const section = document.createElement('section');
+      section.className = 'mock-settings__section';
+      const sectionId = `mock-settings-section-${index}`;
+      section.setAttribute('aria-labelledby', sectionId);
+      const sectionHeading = document.createElement('div');
+      sectionHeading.className = 'mock-settings__section-heading';
+      const sectionTitle = document.createElement('h3');
+      sectionTitle.className = 'mock-settings__section-title';
+      sectionTitle.id = sectionId;
+      sectionTitle.textContent = title;
+      const sectionCopy = document.createElement('p');
+      sectionCopy.className = 'mock-settings__section-copy';
+      sectionCopy.textContent = description;
+      sectionHeading.appendChild(sectionTitle);
+      sectionHeading.appendChild(sectionCopy);
+      section.appendChild(sectionHeading);
+      const grid = document.createElement('div');
+      grid.className = 'mock-settings__grid';
+
+      nodes.forEach(selector => {
+        const node = panel.querySelector(selector);
+        if (!node) return;
+        if (selector === '#setting-site-rule-status') {
+          node.removeAttribute('style');
+          node.className = 'mock-settings__status mock-settings__field--wide';
+          node.setAttribute('role', 'status');
+          section.appendChild(node);
+          return;
+        }
+        if (selector === '#setting-import-site-rules' || selector === '#setting-export-site-rules') {
+          let actions = section.querySelector('.mock-settings__actions');
+          if (!actions) {
+            actions = document.createElement('div');
+            actions.className = 'mock-settings__actions mock-settings__field--wide';
+            section.appendChild(actions);
+          }
+          node.removeAttribute('style');
+          node.className = 'mock-settings__button mock-settings__button--secondary';
+          actions.appendChild(node);
+          return;
+        }
+        if (toggleLabelMap[selector]) {
+          const [label, descriptionText] = toggleLabelMap[selector];
+          const toggle = document.createElement('label');
+          toggle.className = 'mock-settings__toggle mock-settings__field--wide';
+          const content = document.createElement('span');
+          const strong = document.createElement('strong');
+          strong.textContent = label;
+          const small = document.createElement('small');
+          small.textContent = descriptionText;
+          content.appendChild(strong);
+          content.appendChild(small);
+          node.removeAttribute('style');
+          toggle.appendChild(node);
+          toggle.appendChild(content);
+          grid.appendChild(toggle);
+          return;
+        }
+        const [label, note] = fieldLabelMap[selector] || ['未命名设置'];
+        const field = document.createElement('label');
+        field.className = 'mock-settings__field';
+        if (node.tagName === 'TEXTAREA' || selector === '#setting-deepseek-url') field.classList.add('mock-settings__field--wide');
+        const labelText = document.createElement('span');
+        labelText.textContent = label;
+        field.appendChild(labelText);
+        if (note) {
+          const fieldNote = document.createElement('span');
+          fieldNote.className = 'mock-settings__field-note';
+          fieldNote.textContent = note;
+          field.appendChild(fieldNote);
+        }
+        node.removeAttribute('style');
+        node.removeAttribute('onfocus');
+        node.removeAttribute('onblur');
+        node.classList.add('mock-settings__control');
+        field.appendChild(node);
+        grid.appendChild(field);
+      });
+
+      if (grid.children.length) section.appendChild(grid);
+      const actions = section.querySelector('.mock-settings__actions');
+      if (actions) section.appendChild(actions);
+      return section;
+    };
+
+    sectionDefinitions.forEach((definition, index) => body.appendChild(createSection(definition, index)));
+    originalContent.filter(child => child !== heading).forEach(child => child.remove());
+    footer.querySelectorAll('button').forEach(button => {
+      button.removeAttribute('style');
+      button.removeAttribute('onmouseover');
+      button.removeAttribute('onmouseout');
+      button.className = 'mock-settings__button';
+    });
+    const saveButton = footer.querySelector('#setting-save');
+    const cancelButton = footer.querySelector('#setting-cancel');
+    if (saveButton) saveButton.classList.add('mock-settings__button--primary');
+    if (cancelButton) cancelButton.classList.add('mock-settings__button--secondary');
 
     const settings = {
       shortcutSpotlight: panel.querySelector('#setting-spotlight'),
@@ -2800,6 +3077,42 @@
       cancel: panel.querySelector('#setting-cancel'),
       save: panel.querySelector('#setting-save')
     };
+
+    const previouslyFocusedElement = document.activeElement;
+    const getFocusableElements = () => Array.from(panel.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )).filter(element => element.getClientRects().length > 0);
+    const closeSettings = () => {
+      document.removeEventListener('keydown', handleSettingsKeydown, true);
+      container.remove();
+      if (previouslyFocusedElement && previouslyFocusedElement.isConnected && typeof previouslyFocusedElement.focus === 'function') {
+        previouslyFocusedElement.focus({ preventScroll: true });
+      }
+    };
+    const handleSettingsKeydown = event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSettings();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = getFocusableElements();
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleSettingsKeydown, true);
+    container.addEventListener('click', event => {
+      if (event.target === container) closeSettings();
+    });
+    close.addEventListener('click', closeSettings);
 
     settings.shortcutSpotlight.value = CONFIG.SHORTCUT_SPOTLIGHT || 'x';
     settings.shortcutFillAll.value = CONFIG.SHORTCUT_FILL_ALL || 'z';
@@ -2865,7 +3178,7 @@
         alert(`站点规则导出失败：${error.message}`);
       }
     };
-    settings.cancel.onclick = () => container.remove();
+    settings.cancel.onclick = closeSettings;
     settings.save.onclick = () => {
       CONFIG.SHORTCUT_SPOTLIGHT = settings.shortcutSpotlight.value.toLowerCase() || 'x';
       CONFIG.SHORTCUT_FILL_ALL = settings.shortcutFillAll.value.toLowerCase() || 'z';
@@ -2920,9 +3233,10 @@
       if (typeof GM_setValue !== 'undefined') {
         GM_setValue('auto_mock_config', CONFIG);
       }
-      container.remove();
+      closeSettings();
       alert('✅ 高级偏好设置已保存！');
     };
+    requestAnimationFrame(() => close.focus());
   }
 
   if (typeof GM_registerMenuCommand !== 'undefined') {
