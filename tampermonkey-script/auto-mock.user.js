@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Mock Test Data
 // @namespace    http://tampermonkey.net/
-// @version      2.0.4
+// @version      2.0.6
 // @description  一键填充页面Element UI表单测试数据，自带悬浮控制台
 // @author       You
 // @match        *://*/*
@@ -10,7 +10,7 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
-// @connect      api.deepseek.com
+// @connect      *
 // @license      MIT
 // @icon         https://ui-avatars.com/api/?name=M&background=24292e&color=fff&size=128&font-size=0.6&length=1
 // ==/UserScript==
@@ -35,6 +35,7 @@
     NUMBER_FILL_STRATEGY: 'normal',
     FILL_VALIDATION_MODE: 'normal',
     VALIDATE_AFTER_FILL: true,
+    FILL_ONLY_EMPTY: false,
     SITE_RULES: [],
     REMOTE_OPTION_RETRY_COUNT: 4,
     REMOTE_OPTION_RETRY_DELAY_MS: 250,
@@ -48,6 +49,7 @@
   let CONFIG = (typeof GM_getValue !== 'undefined') ? GM_getValue('auto_mock_config', DEFAULT_CONFIG) : DEFAULT_CONFIG;
   CONFIG = { ...DEFAULT_CONFIG, ...(CONFIG || {}) };
   let lastFillOperation = null;
+  let batchFillRunning = false;
 
   const DATA_PROFILES = {
     general: { label: '通用后台数据', code: 'GEN' },
@@ -294,6 +296,7 @@
       boundaryIndex: 0,
       filledFieldValues: [],
       handledFieldElements: new WeakSet(),
+      fieldAttemptCounts: new WeakMap(),
       handledDialogRoots: new WeakSet(),
       dialogStep: 0,
       dynamicFillInProgress: false
@@ -332,8 +335,7 @@
     if (inputEl.isContentEditable) snapshot.content = inputEl.textContent || '';
     else if (inputEl.tagName === 'SELECT' && inputEl.multiple) snapshot.selectedValues = Array.from(inputEl.selectedOptions || []).map(option => option.value);
     else if (inputEl.type === 'radio' && inputEl.name) {
-      snapshot.radioStates = Array.from(document.getElementsByName(inputEl.name))
-        .filter(input => input.type === 'radio')
+      snapshot.radioStates = getNativeRadioGroup(inputEl)
         .map(input => ({ input, checked: input.checked }));
     } else if (inputEl.type === 'checkbox') snapshot.checked = inputEl.checked;
     else snapshot.value = inputEl.value;
@@ -583,6 +585,23 @@
     return [...SELECT_SKIP_KEYWORDS, ...getRuleStringList('optionSkipKeywords')];
   }
 
+  function matchesIgnoreKeyword(fieldText, originalFieldText, keyword) {
+    const normalizedKeyword = String(keyword == null ? '' : keyword).trim();
+    if (!normalizedKeyword) return false;
+    const lowerKeyword = normalizedKeyword.toLowerCase();
+
+    // `id` 只匹配独立词、`id_` / `_id` 与 camelCase 的 `Id`，避免误杀 idCard、identityNo、valid
+    if (lowerKeyword === 'id') {
+      return /(^|[^a-z0-9])id([^a-z0-9]|$)/.test(fieldText)
+        || /[a-z0-9]Id(?![A-Za-z])/.test(originalFieldText)
+        || /[a-z0-9]ID(?![A-Za-z])/.test(originalFieldText)
+        || /(^|[^A-Za-z0-9])ID([^A-Za-z0-9]|$)/.test(originalFieldText);
+    }
+
+    // 其余关键词保持子串匹配，兼容 created/updated 等组合词
+    return fieldText.includes(lowerKeyword);
+  }
+
   function isAutoMockSkippedField(inputEl, labelText, vModelExpr) {
     if (!inputEl) return true;
     if (
@@ -593,18 +612,16 @@
       inputEl.closest('[data-auto-mock-skip], .is-disabled, .disabled, [disabled], [aria-disabled="true"]')
     ) return true;
 
-    const fieldText = [
+    const originalFieldText = [
       labelText,
       vModelExpr,
       inputEl.name,
       inputEl.id,
       inputEl.placeholder,
       inputEl.getAttribute('aria-label')
-    ].filter(Boolean).join(' ').toLowerCase();
-    return getEffectiveIgnoreKeywords().some(keyword => {
-      const normalizedKeyword = String(keyword == null ? '' : keyword).trim().toLowerCase();
-      return normalizedKeyword && fieldText.includes(normalizedKeyword);
-    });
+    ].filter(Boolean).join(' ');
+    const fieldText = originalFieldText.toLowerCase();
+    return getEffectiveIgnoreKeywords().some(keyword => matchesIgnoreKeyword(fieldText, originalFieldText, keyword));
   }
 
   function applySiteFieldAlias(labelText) {
@@ -664,9 +681,10 @@
     {
       title: '📝 日期与文本',
       items: [
+        // dateTime 必须排在 date/time 之前，否则「开始时间 / 创建时间」同分时会落到 time
+        { label: '日期时间', cmd: 'dateTime', hints: '日期时间、开始时间、结束时间', patterns: [/日期时间|时间戳|开始时间|结束时间|创建时间|更新时间/, /\bdatetime\b/] },
         { label: '日期', cmd: 'date', hints: '日期、生日、生效日期', patterns: [/日期|生日|生效日期|到期日期/, /\bdate\b/] },
         { label: '时间', cmd: 'time', hints: '时间、时刻', patterns: [/时间|时刻/, /\btime\b/] },
-        { label: '日期时间', cmd: 'dateTime', hints: '日期时间、开始时间、结束时间', patterns: [/日期时间|时间戳|开始时间|结束时间|创建时间|更新时间/, /\bdatetime\b/] },
         { label: '随机数字', cmd: 'number', hints: '数字、数量、库存、价格', patterns: [/数字|数量|库存|总数|价格/, /\bnum\b/, /\bcount\b/, /\bprice\b/] },
         { label: '颜色值', cmd: 'color', hints: '颜色、色值', patterns: [/颜色|色值/, /\bcolor\b/] },
         { label: '简短文本', cmd: 'randomString', hints: '标题、简称、主题、标签', patterns: [/简称|标题|主题|短描述|标签|摘要|关键字/, /short.?text/] },
@@ -767,16 +785,178 @@
   // ==========================================
   // 3. 业务组件自定义挂载钩子 (Custom Component Hooks)
   // ==========================================
+  // 无内部 input 的 Element 组件，需要按组件根节点采集并通过钩子写值
+  const COMPONENT_FIELD_SELECTORS = '.el-slider, .el-rate, .el-color-picker, .el-transfer';
+  // Transfer 面板内部有复选框，但只有根节点的 v-model 决定右侧列表，需排除内部控件避免逐项勾选
+  const COMPONENT_WITH_INNER_CONTROLS = '.el-transfer';
+  // 下拉类组件根节点：选项点击与字段去重都按它定位
+  const SELECT_WRAPPER_SELECTORS = '.el-select, .el-select-v2, .el-cascader, .el-tree-select, .ant-select, .ant-cascader, [role="combobox"]';
+  // 动态续填会反复重试被跳过的下拉/日期字段，超过次数后放弃，避免在监听窗口内循环开合下拉
+  const MAX_DEFERRED_FIELD_ATTEMPTS = 3;
+
+  function pickCascaderLeafPath(options, session, keys = {}) {
+    const valueKey = keys.value || 'value';
+    const childrenKey = keys.children || 'children';
+    const disabledKey = keys.disabled || 'disabled';
+    const list = (Array.isArray(options) ? options : [])
+      .filter(opt => opt && !opt[disabledKey] && opt[valueKey] !== undefined && opt[valueKey] !== null);
+    if (list.length === 0) return null;
+
+    // 从随机起点向后扫描，既保留随机性又能跳过没有可用子节点的分支
+    const startIndex = Math.floor(getSessionRandom(session)() * list.length);
+    for (let offset = 0; offset < list.length; offset++) {
+      const opt = list[(startIndex + offset) % list.length];
+      const optValue = opt[valueKey];
+      const children = Array.isArray(opt[childrenKey]) ? opt[childrenKey] : [];
+      if (children.length === 0) return [optValue];
+      const childPath = pickCascaderLeafPath(children, session, keys);
+      if (childPath) return [optValue].concat(childPath);
+    }
+    return null;
+  }
+
+  function getComponentNumber(value, fallback) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function buildSteppedNumber(min, max, step, precision, session) {
+    const lower = Math.min(min, max);
+    const upper = Math.max(min, max);
+    const safeStep = step > 0 ? step : 1;
+    const useBoundary = CONFIG.NUMBER_FILL_STRATEGY === 'boundary' || getValidationFillMode() === 'boundary';
+    const raw = useBoundary
+      ? takeBoundaryValue(session, lower, upper)
+      : lower + getSessionRandom(session)() * (upper - lower);
+    const stepped = Math.round((raw - lower) / safeStep) * safeStep + lower;
+    const clamped = Math.min(upper, Math.max(lower, stepped));
+    return Number(clamped.toFixed(Math.max(0, Math.min(20, precision))));
+  }
+
+  // ElTimeSelect 的可选值由面板按 start/end/step 生成（默认 09:00-18:00、每 30 分钟），
+  // v-model 收的是 'HH:mm' 字符串；面板未挂载时按同样规则自行推算，避免写出面板不认的 Date
+  function buildTimeSelectValues(vueInstance) {
+    const pickerOptions = (vueInstance && (vueInstance.pickerOptions || (vueInstance.$props || {}).pickerOptions)) || {};
+    const panel = vueInstance && vueInstance.picker;
+    if (panel && Array.isArray(panel.items) && panel.items.length) {
+      return panel.items.filter(item => item && !item.disabled).map(item => item.value);
+    }
+    const toMinutes = (text) => {
+      const parts = String(text == null ? '' : text).split(':');
+      if (parts.length < 2) return null;
+      const hours = parseInt(parts[0], 10);
+      const minutes = parseInt(parts[1], 10);
+      return Number.isFinite(hours) && Number.isFinite(minutes) ? hours * 60 + minutes : null;
+    };
+    const start = toMinutes(pickerOptions.start || '09:00');
+    const end = toMinutes(pickerOptions.end || '18:00');
+    const step = toMinutes(pickerOptions.step || '00:30');
+    if (start === null || end === null || !step || step <= 0 || end < start) return [];
+    const minTime = toMinutes(pickerOptions.minTime);
+    const maxTime = toMinutes(pickerOptions.maxTime);
+    const values = [];
+    for (let current = start; current <= end; current += step) {
+      // 与面板一致：minTime 之后、maxTime 之前的端点本身不可选
+      if (minTime !== null && current <= minTime) continue;
+      if (maxTime !== null && current >= maxTime) continue;
+      values.push(`${padNumber(Math.floor(current / 60))}:${padNumber(current % 60)}`);
+    }
+    return values;
+  }
+
   const CustomHooks = {
     ElSelect: (vueInstance, labelText, session) => {
-      if (vueInstance.options && vueInstance.options.length > 0) {
-        const validOptions = vueInstance.options.filter(opt => !opt.disabled);
-        if (validOptions.length > 0) {
-          const randomOpt = pickSessionValue(validOptions, session);
-          return emitComponentValue(vueInstance, randomOpt.value);
-        }
+      const options = Array.isArray(vueInstance.options) ? vueInstance.options : [];
+      const validOptions = options.filter(opt => opt && !opt.disabled && opt.value !== undefined && opt.value !== null);
+      if (validOptions.length > 0) {
+        const randomOpt = pickSessionValue(validOptions, session);
+        const isMultiple = Boolean(vueInstance.multiple || (vueInstance.$props && vueInstance.$props.multiple));
+        return emitComponentValue(vueInstance, isMultiple ? [randomOpt.value] : randomOpt.value);
       }
       return false;
+    },
+    ElInputNumber: (vueInstance, labelText, session) => {
+      const props = vueInstance.$props || {};
+      const min = getComponentNumber(vueInstance.min !== undefined ? vueInstance.min : props.min, 1);
+      const max = getComponentNumber(vueInstance.max !== undefined ? vueInstance.max : props.max, Math.max(min + 100, 100));
+      const rawStep = getComponentNumber(vueInstance.step !== undefined ? vueInstance.step : props.step, 1);
+      // 优先使用组件 precision；未显式声明时按 step 的小数位推导，避免写出被组件截断的值
+      const precisionProp = vueInstance.precision !== undefined ? vueInstance.precision : props.precision;
+      const precision = precisionProp !== undefined && precisionProp !== null
+        ? Math.trunc(Number(precisionProp) || 0)
+        : (String(rawStep > 0 ? rawStep : 1).split('.')[1] || '').length;
+      return emitComponentValue(vueInstance, buildSteppedNumber(min, max, rawStep, precision, session));
+    },
+    ElSlider: (vueInstance, labelText, session) => {
+      const props = vueInstance.$props || {};
+      const min = getComponentNumber(vueInstance.min !== undefined ? vueInstance.min : props.min, 0);
+      const max = getComponentNumber(vueInstance.max !== undefined ? vueInstance.max : props.max, 100);
+      const rawStep = getComponentNumber(vueInstance.step !== undefined ? vueInstance.step : props.step, 1);
+      const precision = (String(rawStep > 0 ? rawStep : 1).split('.')[1] || '').length;
+      const isRange = Boolean(vueInstance.range || props.range);
+      if (isRange) {
+        const first = buildSteppedNumber(min, max, rawStep, precision, session);
+        const second = buildSteppedNumber(min, max, rawStep, precision, session);
+        return emitComponentValue(vueInstance, [Math.min(first, second), Math.max(first, second)]);
+      }
+      return emitComponentValue(vueInstance, buildSteppedNumber(min, max, rawStep, precision, session));
+    },
+    ElRate: (vueInstance, labelText, session) => {
+      const props = vueInstance.$props || {};
+      const max = Math.max(1, Math.trunc(getComponentNumber(vueInstance.max !== undefined ? vueInstance.max : props.max, 5)));
+      const allowHalf = Boolean(vueInstance.allowHalf || props.allowHalf);
+      const random = getSessionRandom(session)();
+      const score = allowHalf
+        ? Math.max(1, Math.round(random * max * 2) / 2)
+        : 1 + Math.floor(random * max);
+      return emitComponentValue(vueInstance, Math.min(max, score));
+    },
+    ElColorPicker: (vueInstance, labelText, session) => {
+      const props = vueInstance.$props || {};
+      const random = getSessionRandom(session);
+      const channel = () => 32 + Math.floor(random() * 193);
+      const red = channel();
+      const green = channel();
+      const blue = channel();
+      const showAlpha = Boolean(vueInstance.showAlpha || props.showAlpha);
+      if (showAlpha) {
+        return emitComponentValue(vueInstance, `rgba(${red}, ${green}, ${blue}, ${(0.3 + random() * 0.7).toFixed(2)})`);
+      }
+      const toHex = (value) => value.toString(16).padStart(2, '0');
+      return emitComponentValue(vueInstance, `#${toHex(red)}${toHex(green)}${toHex(blue)}`);
+    },
+    ElTransfer: (vueInstance, labelText, session) => {
+      const props = vueInstance.$props || {};
+      const data = Array.isArray(vueInstance.data) ? vueInstance.data : (Array.isArray(props.data) ? props.data : []);
+      const itemProps = (vueInstance.props && typeof vueInstance.props === 'object' ? vueInstance.props : props.props) || {};
+      const keyField = itemProps.key || 'key';
+      const disabledField = itemProps.disabled || 'disabled';
+      const validItems = data.filter(item => (
+        item && !item[disabledField] && item[keyField] !== undefined && item[keyField] !== null
+      ));
+      if (!validItems.length) return false;
+      // 与原生多选保持一致：随机挑选 1~2 项进入右侧
+      const count = Math.min(validItems.length, Math.max(1, Math.ceil(getSessionRandom(session)() * 2)));
+      const shuffled = [...validItems].sort(() => getSessionRandom(session)() - 0.5);
+      return emitComponentValue(vueInstance, shuffled.slice(0, count).map(item => item[keyField]));
+    },
+    ElCascader: (vueInstance, labelText, session) => {
+      // Element UI 把 multiple / emitPath / lazy 放在 props 对象里，不是组件顶层 prop
+      const cascaderConfig = (vueInstance && vueInstance.config)
+        || (vueInstance.$props && vueInstance.$props.props)
+        || {};
+      // 懒加载级联在展开前拿不到叶子节点，避免写入无效的父级值
+      if (cascaderConfig.lazy === true) return false;
+      const leafPath = pickCascaderLeafPath(vueInstance.options, session, {
+        value: cascaderConfig.value,
+        children: cascaderConfig.children,
+        disabled: cascaderConfig.disabled
+      });
+      if (!leafPath) return false;
+      const emitPath = cascaderConfig.emitPath !== false;
+      const isMultiple = Boolean(cascaderConfig.multiple || vueInstance.multiple);
+      const value = emitPath ? leafPath : leafPath[leafPath.length - 1];
+      return emitComponentValue(vueInstance, isMultiple ? [value] : value);
     },
     ElDatePicker: (vueInstance, labelText, session) => {
       return emitComponentValue(vueInstance, buildDatePickerValue(vueInstance, labelText, session));
@@ -784,15 +964,45 @@
     ElTimePicker: (vueInstance, labelText, session) => {
       return emitComponentValue(vueInstance, buildDatePickerValue(vueInstance, labelText, session));
     },
+    ElTimeSelect: (vueInstance, labelText, session) => {
+      const values = buildTimeSelectValues(vueInstance);
+      if (!values.length) return false;
+      return emitComponentValue(vueInstance, pickSessionValue(values, session));
+    },
     ElSwitch: (vueInstance) => {
-      return emitComponentValue(vueInstance, true);
+      const props = vueInstance.$props || {};
+      const activeValue = vueInstance.activeValue !== undefined
+        ? vueInstance.activeValue
+        : (props.activeValue !== undefined ? props.activeValue : true);
+      return emitComponentValue(vueInstance, activeValue);
     },
     ElRadioGroup: (vueInstance, labelText, session) => {
       if (vueInstance.$children) {
-        const children = vueInstance.$children.filter(c => c.$options.name === 'ElRadio' && !c.disabled);
+        const children = vueInstance.$children.filter(c => (
+          c.$options.name === 'ElRadio' || c.$options.name === 'ElRadioButton'
+        ) && !c.disabled);
         if (children.length > 0) {
           const randomOpt = pickSessionValue(children, session);
           return emitComponentValue(vueInstance, randomOpt.label);
+        }
+      }
+      return false;
+    },
+    ElCheckboxGroup: (vueInstance, labelText, session) => {
+      if (vueInstance.$children) {
+        const children = vueInstance.$children.filter(c => (
+          c.$options.name === 'ElCheckbox' || c.$options.name === 'ElCheckboxButton'
+        ) && !c.disabled);
+        if (children.length > 0) {
+          const props = vueInstance.$props || {};
+          // 组级 min/max 只在子项点击时校验，直接写 v-model 会绕过，这里主动选中合法数量
+          const rawMin = getComponentNumber(vueInstance.min !== undefined ? vueInstance.min : props.min, 1);
+          const rawMax = getComponentNumber(vueInstance.max !== undefined ? vueInstance.max : props.max, 2);
+          const lower = Math.max(1, Math.min(Math.trunc(rawMin) || 1, children.length));
+          const upper = Math.max(lower, Math.min(Math.trunc(rawMax) || children.length, children.length));
+          const count = lower + Math.floor(getSessionRandom(session)() * (upper - lower + 1));
+          const shuffled = [...children].sort(() => getSessionRandom(session)() - 0.5);
+          return emitComponentValue(vueInstance, shuffled.slice(0, count).map(child => child.label));
         }
       }
       return false;
@@ -801,9 +1011,17 @@
 
   const LocalHookDisplayNames = {
     ElSelect: '推荐选项',
+    ElInputNumber: '随机数值',
+    ElSlider: '随机区间',
+    ElRate: '随机评分',
+    ElColorPicker: '随机颜色',
+    ElTransfer: '随机穿梭项',
+    ElCascader: '级联选项',
     ElRadioGroup: '推荐选项',
+    ElCheckboxGroup: '推荐选项',
     ElDatePicker: '当前日期',
     ElTimePicker: '当前时间',
+    ElTimeSelect: '可选时间',
     ElSwitch: '开启状态'
   };
 
@@ -812,11 +1030,16 @@
   }
 
   function isAiSuggestionComponent(componentName) {
-    return componentName === 'ElSelect' || componentName === 'ElRadioGroup';
+    return componentName === 'ElSelect' || componentName === 'ElRadioGroup' || componentName === 'ElCheckboxGroup';
   }
 
+  const LOCAL_ONLY_HOOK_COMPONENTS = new Set([
+    'ElInputNumber', 'ElSlider', 'ElRate', 'ElColorPicker', 'ElTransfer', 'ElCascader',
+    'ElCheckboxGroup', 'ElDatePicker', 'ElTimePicker', 'ElTimeSelect', 'ElSwitch'
+  ]);
+
   function isLocalOnlyHookComponent(componentName) {
-    return componentName === 'ElDatePicker' || componentName === 'ElTimePicker' || componentName === 'ElSwitch';
+    return LOCAL_ONLY_HOOK_COMPONENTS.has(componentName);
   }
 
   function createHookFillAction(vueInstance, componentName, labelText) {
@@ -836,23 +1059,43 @@
     if (!vueInstance) return [];
 
     if (componentName === 'ElSelect' && Array.isArray(vueInstance.options)) {
+      const isMultiple = Boolean(vueInstance.multiple || (vueInstance.$props && vueInstance.$props.multiple));
       return vueInstance.options
-        .filter(opt => opt && !opt.disabled)
-        .map(opt => ({
-          label: String(opt.currentLabel || opt.label || opt.value || '').trim(),
-          value: opt.value,
-          apply: () => emitComponentValue(vueInstance, opt.value)
-        }))
+        .filter(opt => opt && !opt.disabled && opt.value !== undefined && opt.value !== null)
+        .map(opt => {
+          const rawLabel = opt.currentLabel || opt.label || opt.value;
+          return {
+            label: String(rawLabel == null ? '' : rawLabel).trim(),
+            value: opt.value,
+            apply: () => emitComponentValue(vueInstance, isMultiple ? [opt.value] : opt.value)
+          };
+        })
         .filter(opt => opt.label);
     }
 
     if (componentName === 'ElRadioGroup' && Array.isArray(vueInstance.$children)) {
       return vueInstance.$children
-        .filter(child => child && child.$options && child.$options.name === 'ElRadio' && !child.disabled)
+        .filter(child => child && child.$options && (
+          child.$options.name === 'ElRadio' || child.$options.name === 'ElRadioButton'
+        ) && !child.disabled)
         .map(child => ({
           label: String(child.label == null ? '' : child.label).trim(),
           value: child.label,
           apply: () => emitComponentValue(vueInstance, child.label)
+        }))
+        .filter(opt => opt.label);
+    }
+
+    if (componentName === 'ElCheckboxGroup' && Array.isArray(vueInstance.$children)) {
+      return vueInstance.$children
+        .filter(child => child && child.$options && (
+          child.$options.name === 'ElCheckbox' || child.$options.name === 'ElCheckboxButton'
+        ) && !child.disabled)
+        .map(child => ({
+          // 复选框组的 v-model 是数组，apply 时按数组写回
+          label: String(child.label == null ? '' : child.label).trim(),
+          value: child.label,
+          apply: () => emitComponentValue(vueInstance, [child.label])
         }))
         .filter(opt => opt.label);
     }
@@ -945,9 +1188,22 @@
 
   // === DeepSeek 通信核心 ===
   const AI_REQUEST_TIMEOUT_MS = 15000;
+  const AI_RATE_LIMIT_WINDOW_MS = 60000;
+  const AI_RATE_LIMIT_MAX = 30;
   const DEEPSEEK_CACHE_LIMIT = 100;
   const deepseekCache = new Map();
   const deepseekPendingRequests = new Map();
+  const aiRequestTimestamps = [];
+
+  function isAiRateLimited() {
+    const now = Date.now();
+    while (aiRequestTimestamps.length && now - aiRequestTimestamps[0] > AI_RATE_LIMIT_WINDOW_MS) {
+      aiRequestTimestamps.shift();
+    }
+    if (aiRequestTimestamps.length >= AI_RATE_LIMIT_MAX) return true;
+    aiRequestTimestamps.push(now);
+    return false;
+  }
 
   function cacheDeepSeekResult(promptKey, value) {
     if (deepseekCache.has(promptKey)) deepseekCache.delete(promptKey);
@@ -998,7 +1254,10 @@
       }
       const promptKey = promptText || label;
       if (deepseekCache.has(promptKey)) return settle(deepseekCache.get(promptKey));
-      
+      if (isAiRateLimited()) {
+        return settle({ error: 'AI 请求过于频繁（30 次/分钟），请稍后再试' });
+      }
+
       const requestUrl = CONFIG.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions';
       const requestBody = {
         model: CONFIG.DEEPSEEK_API_MODEL || "deepseek-v4-flash",
@@ -1127,7 +1386,7 @@
   let deferredDialogDebounce = null;
 
   const FIELD_CONTAINER_SELECTORS = [
-    '.el-input', '.el-textarea', '.el-select', '.el-date-editor', '.el-cascader', '.el-radio-group', '.el-checkbox-group', '.el-switch', '.el-form-item',
+    '.el-input', '.el-textarea', '.el-select', '.el-autocomplete', '.el-date-editor', '.el-cascader', '.el-radio-group', '.el-checkbox-group', '.el-switch', '.el-input-number', '.el-slider', '.el-rate', '.el-color-picker', '.el-transfer', '.el-form-item',
     '.el-select-v2', '.el-tree-select',
     '.ant-input', '.ant-select', '.ant-picker', '.ant-cascader', '.ant-radio-group', '.ant-checkbox-group', '.ant-switch', '.ant-form-item',
     '[role="combobox"]', '[role="listbox"]', '[contenteditable="true"]', 'select', 'input', 'textarea'
@@ -1286,10 +1545,19 @@
   function collectFillableInputs(root) {
     const queryRoot = root && typeof root.querySelectorAll === 'function' ? root : document;
     const seen = new Set();
-    return queryAllBySelectors(queryRoot, getEffectiveInputSelectors()).filter(input => {
+    const candidates = queryAllBySelectors(queryRoot, getEffectiveInputSelectors());
+    queryAllBySelectors(queryRoot, [COMPONENT_FIELD_SELECTORS]).forEach(element => {
+      // show-input 的 Slider 内部自带 InputNumber，交给内部输入处理，避免同一值写两次；
+      // Transfer 内部的复选框只控制「待移动」勾选，真正写值的是根节点 v-model
+      const hasInnerField = element.querySelector('input, textarea, select, [contenteditable="true"]');
+      if (!hasInnerField || element.matches(COMPONENT_WITH_INNER_CONTROLS)) candidates.push(element);
+    });
+    return candidates.filter(input => {
       if (seen.has(input)) return false;
       seen.add(input);
       if (input.closest(AUTO_MOCK_UI_SELECTOR)) return false;
+      // Transfer 面板内的复选框只控制「待移动」勾选，不直接对应 v-model，跳过以免影响右侧列表
+      if (input.closest(COMPONENT_WITH_INNER_CONTROLS) && !input.matches(COMPONENT_WITH_INNER_CONTROLS)) return false;
       return isFieldVisible(input);
     });
   }
@@ -1299,7 +1567,8 @@
       target.tagName === 'INPUT' ||
       target.tagName === 'TEXTAREA' ||
       target.tagName === 'SELECT' ||
-      target.isContentEditable
+      target.isContentEditable ||
+      (target.nodeType === 1 && typeof target.matches === 'function' && target.matches(COMPONENT_FIELD_SELECTORS))
     );
   }
 
@@ -1315,7 +1584,8 @@
     if (isFormFieldElement(element) && element.type !== 'hidden') return element;
     if (typeof element.querySelector !== 'function') return null;
 
-    const fields = queryAllBySelectors(element, getEffectiveInputSelectors());
+    const fields = queryAllBySelectors(element, getEffectiveInputSelectors())
+      .concat(queryAllBySelectors(element, [COMPONENT_FIELD_SELECTORS]));
     for (let i = 0; i < fields.length; i++) {
       if (isFormFieldElement(fields[i]) && fields[i].type !== 'hidden') return fields[i];
     }
@@ -1355,6 +1625,9 @@
     if (input.type === 'checkbox') return 'checkbox';
     if (input.type === 'radio') return 'radio';
     if (input.closest('.el-cascader, .ant-cascader, .el-tree-select')) return 'cascader';
+    // ElAutocomplete 根节点带 role="combobox"，但它是自由文本输入，候选项来自远程建议
+    // 走下拉选项路径必然选不到，按文本写入其 v-model 才有意义
+    if (input.closest('.el-autocomplete')) return 'text';
     if (input.closest('.el-select, .el-select-v2, .ant-select, [role="combobox"]')) return 'semantic-select';
     if (input.closest('.el-date-editor, .ant-picker')) return 'date-picker';
     return 'text';
@@ -1362,9 +1635,16 @@
 
   function getFieldIdentity(input) {
     const kind = getFieldKind(input);
-    if (kind === 'radio' && input.name) return `radio:${input.name}`;
+    if (kind === 'radio' || kind === 'checkbox') {
+      // 同一组单选/复选共用一个 v-model，按组去重，避免整组被反复写入
+      const group = typeof input.closest === 'function'
+        ? input.closest('.el-radio-group, .ant-radio-group, .el-checkbox-group, .ant-checkbox-group')
+        : null;
+      if (group) return group;
+      if (kind === 'radio' && input.name) return `radio:${input.name}`;
+    }
     if (kind === 'semantic-select' || kind === 'cascader' || kind === 'date-picker') {
-      const wrapper = input.closest('.el-select, .el-select-v2, .el-cascader, .el-tree-select, .el-date-editor, .ant-select, .ant-cascader, .ant-picker, [role="combobox"]');
+      const wrapper = input.closest(`${SELECT_WRAPPER_SELECTORS}, .el-date-editor, .ant-picker`);
       if (wrapper) return wrapper;
     }
     return input;
@@ -1478,8 +1758,9 @@
 
   function getVueInstance(input) {
     if (!input || typeof input.closest !== 'function') return null;
-    const selectors = '.el-select, .el-select-v2, .el-date-editor, .el-cascader, .el-tree-select, .el-radio-group, .el-checkbox-group, .el-switch, .ant-select, .ant-picker, .ant-cascader, .ant-radio-group, .ant-checkbox-group, .ant-switch, .el-input, .el-textarea';
-    const wrapper = input.closest(selectors);
+    const selectors = '.el-autocomplete, .el-select, .el-select-v2, .el-date-editor, .el-cascader, .el-tree-select, .el-radio-group, .el-checkbox-group, .el-switch, .ant-select, .ant-picker, .ant-cascader, .ant-radio-group, .ant-checkbox-group, .ant-switch, .el-input, .el-textarea';
+    // .el-input-number 内部也包着 .el-input，需先取外层实例，才能拿到 min/max/step/precision
+    const wrapper = input.closest('.el-input-number') || input.closest(selectors);
     const directInstance = getVueInstanceFromElement(wrapper) || getVueInstanceFromElement(input);
     if (directInstance) return directInstance;
 
@@ -1491,8 +1772,21 @@
     return null;
   }
 
-  function emitComponentValue(vueInstance, value) {
+  // 只有声明了 value / modelValue 的实例才可能接受 v-model 写入。
+  // getVueInstance 会向上回溯 5 层，可能拿到 ElFormItem / ElForm / ElDialog，
+  // 对这些实例 $emit('input') 没有任何效果，却会让调用方误判为「填充成功」。
+  function canAcceptComponentValue(vueInstance) {
     if (!vueInstance) return false;
+    const props = vueInstance.$options && vueInstance.$options.props;
+    if (!props) return false;
+    // Vue 2 的 $options.props 保留原写法，数组形式 props: ['value'] 也要识别
+    if (Array.isArray(props)) return props.includes('value') || props.includes('modelValue');
+    return Object.prototype.hasOwnProperty.call(props, 'value')
+      || Object.prototype.hasOwnProperty.call(props, 'modelValue');
+  }
+
+  function emitComponentValue(vueInstance, value) {
+    if (!vueInstance || !canAcceptComponentValue(vueInstance)) return false;
     const emit = typeof vueInstance.$emit === 'function'
       ? vueInstance.$emit.bind(vueInstance)
       : typeof vueInstance.emit === 'function'
@@ -1506,19 +1800,131 @@
     return true;
   }
 
+  // 与 Element src/utils/date-util.js 的 getWeekNumber 一致：ISO 8601 周数，周四决定归属年份
+  function getIsoWeekNumber(value) {
+    const date = new Date(value.getTime());
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() + 3 - (date.getDay() + 6) % 7);
+    const week1 = new Date(date.getFullYear(), 0, 4);
+    return 1 + Math.round(((date.getTime() - week1.getTime()) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
+  }
+
+  function formatDateValue(value, format) {
+    if (!(value instanceof Date) || !format) return value;
+    // week 类型默认格式是 yyyywWW：fecha 不认识 W，原样保留后由 formatter 替换周数
+    let target = value;
+    let week = null;
+    if (/W/.test(format)) {
+      week = getIsoWeekNumber(value);
+      // 12 月末归属次年第一周时，Element 先把日期挪到该周周四再取年份
+      if (week === 1 && value.getMonth() === 11) {
+        target = new Date(value.getTime());
+        target.setHours(0, 0, 0, 0);
+        target.setDate(target.getDate() + 3 - (target.getDay() + 6) % 7);
+      }
+    }
+    const pad = (num) => String(num).padStart(2, '0');
+    const year = target.getFullYear();
+    const month = target.getMonth() + 1;
+    const day = target.getDate();
+    const hours = target.getHours();
+    const hours12 = hours % 12 || 12;
+    // 同时覆盖 Element UI 的补零与非补零格式（yyyy-M-d、H:m:s 等）
+    const tokens = {
+      yyyy: String(year),
+      YYYY: String(year),
+      yy: String(year).slice(-2),
+      YY: String(year).slice(-2),
+      MM: pad(month),
+      M: String(month),
+      dd: pad(day),
+      d: String(day),
+      DD: pad(day),
+      D: String(day),
+      HH: pad(hours),
+      H: String(hours),
+      hh: pad(hours12),
+      h: String(hours12),
+      mm: pad(target.getMinutes()),
+      m: String(target.getMinutes()),
+      ss: pad(target.getSeconds()),
+      s: String(target.getSeconds()),
+      A: hours < 12 ? 'AM' : 'PM',
+      a: hours < 12 ? 'am' : 'pm'
+    };
+    const formatted = String(format).replace(/yyyy|YYYY|yy|YY|MM|M|dd|d|DD|D|HH|H|hh|h|mm|m|ss|s|A|a/g, token => tokens[token]);
+    if (week === null) return formatted;
+    // 与 Element week formatter 相同：有 WW 时替换为补零周数，否则替换第一个 W
+    if (/WW/.test(formatted)) return formatted.replace(/WW/, week < 10 ? `0${week}` : String(week));
+    return formatted.replace(/W/, String(week));
+  }
+
+  // 业务常通过 pickerOptions.disabledDate 禁选周末、过去日期等，
+  // 直接写一个被禁用的日期会被组件丢弃，因此先探测可用日期再写回
+  function findEnabledDate(candidate, disabledDate, direction) {
+    if (typeof disabledDate !== 'function') return candidate;
+    const step = direction < 0 ? -1 : 1;
+    const probe = new Date(candidate.getTime());
+    for (let offset = 0; offset < 60; offset++) {
+      try {
+        if (!disabledDate(probe)) return new Date(probe.getTime());
+      } catch (error) {
+        return candidate;
+      }
+      probe.setDate(probe.getDate() + step);
+    }
+    return candidate;
+  }
+
   function buildDatePickerValue(vueInstance, labelText = '', session) {
+    const props = vueInstance && vueInstance.$props ? vueInstance.$props : {};
     const rawType = String(
-      (vueInstance && vueInstance.type) ||
-      (vueInstance && vueInstance.$props && vueInstance.$props.type) ||
-      ''
+      (vueInstance && (vueInstance.type || props.type)) || ''
     ).toLowerCase();
+    const isRange = Boolean(
+      rawType.includes('range') ||
+      (vueInstance && vueInstance.isRange !== undefined ? vueInstance.isRange : props.isRange)
+    );
+    // dates / months / years 的 v-model 是数组，即使只选一个值也要按数组写回
+    const isMultiDate = rawType === 'dates' || rawType === 'months' || rawType === 'years';
     const end = new Date(session && session.baseDate ? session.baseDate : Date.now());
     const start = new Date(end);
-    start.setDate(start.getDate() - 7);
-    if (rawType.includes('range')) return [start, end];
-    if (/开始|起始|start|from/i.test(labelText)) return start;
-    if (/结束|截止|到期|end|to/i.test(labelText)) return end;
-    return end;
+    const componentName = vueInstance && vueInstance.$options && vueInstance.$options.name;
+    if (componentName === 'ElTimePicker') start.setHours(start.getHours() - 1);
+    else if (rawType === 'monthrange') {
+      // 月份范围对齐到月初，避免结束月份只覆盖半个月
+      start.setMonth(start.getMonth() - 1, 1);
+      end.setDate(1);
+    } else start.setDate(start.getDate() - 7);
+
+    let value;
+    if (isRange) value = [start, end];
+    else if (/开始|起始|start|from/i.test(labelText)) value = start;
+    else if (/结束|截止|到期|end|to/i.test(labelText)) value = end;
+    else value = end;
+    if (isMultiDate && !Array.isArray(value)) value = [value];
+
+    const pickerOptions = (vueInstance && (vueInstance.pickerOptions || props.pickerOptions)) || {};
+    const disabledDate = pickerOptions.disabledDate;
+    if (typeof disabledDate === 'function') {
+      // 开始日期向后找，结束日期向前找，保证范围不会倒置
+      value = Array.isArray(value)
+        ? [findEnabledDate(value[0], disabledDate, 1), findEnabledDate(value[1], disabledDate, -1)]
+        : findEnabledDate(value, disabledDate, 1);
+    }
+
+    const valueFormat = String(
+      (vueInstance && (vueInstance.valueFormat || props.valueFormat)) || ''
+    );
+    if (valueFormat === 'timestamp') {
+      const toTimestamp = (item) => item.getTime();
+      return Array.isArray(value) ? value.map(toTimestamp) : toTimestamp(value);
+    }
+    if (valueFormat) {
+      return Array.isArray(value) ? value.map(item => formatDateValue(item, valueFormat)) : formatDateValue(value, valueFormat);
+    }
+    // 时间选择器没有 value-format 时 Element 内部仍按 Date 处理，范围值回退为 Date 数组
+    return value;
   }
 
   function setNativeProperty(element, property, value) {
@@ -1679,13 +2085,30 @@
     return Boolean(text) && !getEffectiveOptionSkipKeywords().some(keyword => text.includes(keyword));
   }
 
-  function getVisibleChoiceElements() {
+  function getVisibleChoiceElements(root) {
     const selector = [
       '.el-select-dropdown__item', '.el-select-v2__item', '.el-cascader-node', '.el-tree-node__content',
       '.ant-select-item-option', '.ant-cascader-menu-item',
       '[role="listbox"] [role="option"]', '[role="option"]'
     ].join(', ');
-    return Array.from(document.querySelectorAll(selector)).filter(isSafeOptionElement);
+    const queryRoot = root && typeof root.querySelectorAll === 'function' ? root : document;
+    return Array.from(queryRoot.querySelectorAll(selector)).filter(isSafeOptionElement);
+  }
+
+  // Element 的下拉默认挂在 body 上，inputEl.closest() 找不到；
+  // 优先取组件实例关联的 popper，避免页面上同时有多个可见下拉时点错字段的选项
+  function getComponentPopper(vueInstance) {
+    if (!vueInstance) return null;
+    const popperRef = vueInstance.$refs && vueInstance.$refs.popper;
+    const candidates = [
+      vueInstance.popperElm,
+      popperRef && (popperRef.$el || popperRef)
+    ];
+    for (let i = 0; i < candidates.length; i++) {
+      const element = candidates[i];
+      if (element && element.nodeType === 1) return element;
+    }
+    return null;
   }
 
   function waitForRender(delay = 80) {
@@ -1698,8 +2121,58 @@
     return Math.min(maximum, Math.max(minimum, parsed));
   }
 
+  // 级联是逐层展开的：只点一次很可能落在父节点上，父级值对业务没有意义。
+  // 这里优先点叶子节点，全是父节点时逐层展开，最多 5 层，兼顾 lazyLoad 场景。
+  async function chooseCascaderDomPath(inputEl, session) {
+    const vueInstance = getVueInstance(inputEl);
+    for (let depth = 0; depth < 5; depth++) {
+      const popper = getComponentPopper(vueInstance);
+      const scope = popper || document;
+      const nodes = Array.from(scope.querySelectorAll('.el-cascader-node')).filter(isSafeOptionElement);
+      if (!nodes.length) return false;
+      // 只看当前展开的最后一列，避免点到前面列里已经选过的节点
+      const menus = Array.from(scope.querySelectorAll('.el-cascader-menu'));
+      const activeMenu = menus.length ? menus[menus.length - 1] : scope;
+      const activeNodes = nodes.filter(node => activeMenu.contains(node));
+      const candidates = activeNodes.length ? activeNodes : nodes;
+      const leafNodes = candidates.filter(node => !node.querySelector('.el-icon-arrow-right'));
+      if (leafNodes.length) {
+        const leaf = pickSessionValue(leafNodes, session);
+        leaf.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        leaf.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        leaf.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await waitForRender(0);
+        return true;
+      }
+      const parent = pickSessionValue(candidates, session);
+      parent.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      parent.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      parent.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await waitForRender(80);
+    }
+    return false;
+  }
+
+  // 脚本用 mousedown 打开的下拉不会因点击外部而关闭：多选点完选项、或重试后仍无选项时，
+  // 下拉会一直盖在表单上。只通过组件自身状态关闭，不派发 Esc，避免误关外层弹窗
+  function closeComponentDropdown(vueInstance) {
+    // 内层 input 可能先命中 ElInput 实例，向上找真正持有下拉状态的 Select / Cascader
+    let current = vueInstance;
+    for (let depth = 0; current && depth < 3; depth++, current = current.$parent) {
+      if (typeof current.toggleDropDownVisible === 'function') {
+        if (current.dropDownVisible) current.toggleDropDownVisible(false);
+        return;
+      }
+      if (typeof current.visible === 'boolean' && typeof current.handleClose === 'function') {
+        if (current.visible) current.visible = false;
+        return;
+      }
+    }
+  }
+
   async function chooseDomOption(inputEl, session, labelText) {
-    const wrapper = inputEl.closest('.el-select, .el-select-v2, .el-cascader, .el-tree-select, .ant-select, .ant-cascader, [role="combobox"]') || inputEl;
+    const wrapper = inputEl.closest(SELECT_WRAPPER_SELECTORS) || inputEl;
+    const vueInstance = getVueInstance(inputEl);
     const originalValue = getCurrentFieldValue(inputEl);
     const cascadeSearchValue = getCascadeSearchValue(inputEl, labelText, session);
     wrapper.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
@@ -1713,16 +2186,33 @@
 
     for (let attempt = 0; attempt <= retryCount; attempt++) {
       if (attempt > 0) await waitForRender(retryDelay);
-      const options = getVisibleChoiceElements();
+      // 级联要一层层点，走专门的逐层展开逻辑，其余下拉只点一次
+      if (wrapper.matches('.el-cascader, .ant-cascader')) {
+        const cascaderPopper = getComponentPopper(vueInstance);
+        const cascaderScope = cascaderPopper || document;
+        if (cascaderScope.querySelector('.el-cascader-node, .ant-cascader-menu-item')) {
+          if (await chooseCascaderDomPath(inputEl, session)) {
+            closeComponentDropdown(vueInstance);
+            return true;
+          }
+        }
+        continue;
+      }
+      // 先限定到当前组件的 popper；取不到时才回退到全局可见选项
+      const popper = getComponentPopper(vueInstance);
+      let options = popper ? getVisibleChoiceElements(popper) : [];
+      if (!options.length) options = getVisibleChoiceElements();
       if (!options.length) continue;
       const option = pickSessionValue(options, session);
       option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
       option.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
       option.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await waitForRender(0);
+      closeComponentDropdown(vueInstance);
       return true;
     }
     if (usedCascadeSearch) applyRemoteSearchQuery(inputEl, originalValue);
+    closeComponentDropdown(vueInstance);
     return false;
   }
 
@@ -1746,10 +2236,17 @@
     return true;
   }
 
+  // 浏览器按 name + 所属表单划分单选组；直接按 document 取同名项，会把弹窗和底层页面的同名单选混为一组
+  function getNativeRadioGroup(inputEl) {
+    const owner = inputEl.form || null;
+    return Array.from(document.getElementsByName(inputEl.name))
+      .filter(input => input.type === 'radio' && (input.form || null) === owner);
+  }
+
   function chooseNativeCheck(inputEl, session) {
     if (inputEl.type === 'radio') {
       const group = inputEl.name
-        ? Array.from(document.getElementsByName(inputEl.name)).filter(input => input.type === 'radio' && !input.disabled && isFieldVisible(input))
+        ? getNativeRadioGroup(inputEl).filter(input => !input.disabled && isFieldVisible(input))
         : [inputEl];
       if (!group.length) return false;
       const selected = pickSessionValue(group, session);
@@ -1888,9 +2385,20 @@
     return index % 2 === 0 ? first : second;
   }
 
+  // Element / Ant 的必填由表单项 rules 决定，只在外层 is-required 类上体现，内部 input 没有 required 属性
+  function isRequiredField(inputEl) {
+    if (!inputEl) return false;
+    if (inputEl.required || inputEl.getAttribute('aria-required') === 'true') return true;
+    if (typeof inputEl.closest !== 'function') return false;
+    if (inputEl.closest('.el-form-item.is-required')) return true;
+    // Ant 的必填标记在 label 上而非 input 祖先，需先回到表单项再查找；不用 :has() 以兼容旧浏览器
+    const antItem = inputEl.closest('.ant-form-item');
+    return Boolean(antItem && antItem.querySelector('.ant-form-item-required'));
+  }
+
   function buildInvalidMockValue(inputEl) {
     const fieldType = String(inputEl.type || '').toLowerCase();
-    if (inputEl.required) return '';
+    if (isRequiredField(inputEl)) return '';
     if (fieldType === 'email') return 'invalid-email';
     if (fieldType === 'url') return 'invalid-url';
     if (fieldType === 'number' || fieldType === 'range') {
@@ -1989,6 +2497,10 @@
   }
 
   function applyNativeValue(inputEl, value) {
+    // Slider/Rate/ColorPicker 是组件根节点，没有原生 value，拿不到 Vue 实例时应跳过而不是伪造成功
+    if (inputEl.nodeType === 1 && typeof inputEl.matches === 'function' && inputEl.matches(COMPONENT_FIELD_SELECTORS)) {
+      return false;
+    }
     if (inputEl.isContentEditable) {
       inputEl.textContent = value;
       dispatchFieldEvents(inputEl);
@@ -2000,6 +2512,23 @@
   }
 
   function clearFieldForInvalidMode(inputEl, vueInstance, fieldKind) {
+    const componentName = getVueComponentName(vueInstance);
+    if (componentName === 'ElSwitch') {
+      const props = vueInstance.$props || {};
+      const inactiveValue = vueInstance.inactiveValue !== undefined ? vueInstance.inactiveValue : props.inactiveValue;
+      if (emitComponentValue(vueInstance, inactiveValue !== undefined ? inactiveValue : false)) return true;
+    }
+    if (componentName === 'ElCheckboxGroup' && emitComponentValue(vueInstance, [])) return true;
+    if (componentName === 'ElRadioGroup' && emitComponentValue(vueInstance, null)) return true;
+    if (componentName === 'ElSlider') {
+      const props = vueInstance.$props || {};
+      const min = getComponentNumber(vueInstance.min !== undefined ? vueInstance.min : props.min, 0);
+      const emptyValue = (vueInstance.range || props.range) ? [min, min] : min;
+      if (emitComponentValue(vueInstance, emptyValue)) return true;
+    }
+    if (componentName === 'ElRate' && emitComponentValue(vueInstance, 0)) return true;
+    if (componentName === 'ElColorPicker' && emitComponentValue(vueInstance, '')) return true;
+    if (componentName === 'ElTransfer' && emitComponentValue(vueInstance, [])) return true;
     if (fieldKind === 'native-select' || fieldKind === 'native-multi-select') {
       Array.from(inputEl.options || []).forEach(option => setNativeProperty(option, 'selected', false));
       setNativeProperty(inputEl, 'value', '');
@@ -2012,8 +2541,8 @@
       return true;
     }
     if (fieldKind === 'radio') {
-      const radios = inputEl.name ? Array.from(document.getElementsByName(inputEl.name)) : [inputEl];
-      radios.filter(radio => radio.type === 'radio').forEach(radio => setNativeProperty(radio, 'checked', false));
+      const radios = inputEl.name ? getNativeRadioGroup(inputEl) : [inputEl];
+      radios.forEach(radio => setNativeProperty(radio, 'checked', false));
       dispatchFieldEvents(inputEl);
       return true;
     }
@@ -2035,6 +2564,11 @@
     if (fieldKind === 'native-select' || fieldKind === 'native-multi-select') {
       return { status: chooseNativeSelect(inputEl, session) ? 'filled' : 'skipped' };
     }
+    // Element 的 Switch / RadioGroup / CheckboxGroup 无法用原生 checked+change 还原语义
+    // （Switch 的 change 是「取反当前模型」，复选框组会全选），命中钩子时优先走组件层
+    if ((fieldKind === 'checkbox' || fieldKind === 'radio') && vueInstance && CustomHooks[componentName]) {
+      return { status: CustomHooks[componentName](vueInstance, labelText, session) ? 'filled' : 'skipped' };
+    }
     if (fieldKind === 'checkbox' || fieldKind === 'radio') {
       return { status: chooseNativeCheck(inputEl, session) ? 'filled' : 'skipped' };
     }
@@ -2044,7 +2578,9 @@
       }
       return { status: await chooseDomOption(inputEl, session, labelText) ? 'filled' : 'skipped' };
     }
-    if (vueInstance && CustomHooks[componentName] && !forcedCommand) {
+    // 组件根节点没有可写的原生 value，强制命令也必须走钩子，否则只会写到 DOM 属性上
+    const isComponentRoot = !['INPUT', 'TEXTAREA', 'SELECT'].includes(inputEl.tagName) && !inputEl.isContentEditable;
+    if (vueInstance && CustomHooks[componentName] && (!forcedCommand || isComponentRoot)) {
       return { status: CustomHooks[componentName](vueInstance, labelText, session) ? 'filled' : 'skipped' };
     }
 
@@ -2494,7 +3030,7 @@
     if (!cmd) return;
     const context = resolveSpotlightContext();
     if (!context) {
-      alert(`Auto Mock: 请先点击可编辑的表单字段，再按 Alt+${(CONFIG.SHORTCUT_SPOTLIGHT || 'x').toUpperCase()} 或 ${getAiShortcutText()} 使用智能推荐。`);
+      showOperationToast(`Auto Mock: 请先点击可编辑的表单字段，再按 Alt+${(CONFIG.SHORTCUT_SPOTLIGHT || 'x').toUpperCase()} 或 ${getAiShortcutText()} 使用智能推荐。`, false);
       return;
     }
     spotlightTargetElement = context.inputEl;
@@ -2511,10 +3047,36 @@
     return applyNativeValue(inputEl, mockValue);
   }
 
+  // 「只填空字段」专用：Slider / Rate 的初始值是 min / 0，读出来是 '0' 但并不代表用户已填，
+  // 直接用 getCurrentFieldValue 会让这两类组件永远被跳过。show-input 的 Slider 内层 input 同理
+  function hasExistingFieldValue(inputEl) {
+    const root = typeof inputEl.closest === 'function' ? inputEl.closest('.el-slider, .el-rate') : null;
+    if (root) {
+      const vueInstance = getVueInstanceFromElement(root);
+      const state = readVueFieldValue(vueInstance);
+      if (state.exists) {
+        const props = vueInstance.$props || {};
+        const floor = root.matches('.el-rate')
+          ? 0
+          : getComponentNumber(vueInstance.min !== undefined ? vueInstance.min : props.min, 0);
+        const values = Array.isArray(state.value) ? state.value : [state.value];
+        return values.some(item => Number(item) !== floor);
+      }
+    }
+    return Boolean(getCurrentFieldValue(inputEl));
+  }
+
   function getCurrentFieldValue(inputEl) {
+    if (inputEl.nodeType === 1 && typeof inputEl.matches === 'function' && inputEl.matches(COMPONENT_FIELD_SELECTORS)) {
+      const componentValue = readVueFieldValue(getVueInstance(inputEl));
+      if (componentValue.exists) {
+        const raw = componentValue.value;
+        return String(Array.isArray(raw) ? raw.join(',') : (raw == null ? '' : raw)).trim();
+      }
+    }
     if (inputEl.isContentEditable) return (inputEl.textContent || '').trim();
     if (inputEl.type === 'radio' && inputEl.name) {
-      return Array.from(document.getElementsByName(inputEl.name)).some(input => input.type === 'radio' && input.checked) ? 'checked' : '';
+      return getNativeRadioGroup(inputEl).some(input => input.checked) ? 'checked' : '';
     }
     if (inputEl.type === 'checkbox' || inputEl.type === 'radio') return inputEl.checked ? 'checked' : '';
     if (inputEl.tagName === 'SELECT' && inputEl.multiple) {
@@ -2549,7 +3111,7 @@
 
       const label = getLabelForInput(inputEl, getVueInstance(inputEl)) || '未命名字段';
       const reasons = new Set();
-      if (inputEl.required && !getCurrentFieldValue(inputEl)) reasons.add('必填项未填写');
+      if (isRequiredField(inputEl) && !getCurrentFieldValue(inputEl)) reasons.add('必填项未填写');
       const nativeReason = getNativeValidityReason(inputEl.validity);
       if (nativeReason) reasons.add(nativeReason);
       if (inputEl.getAttribute('aria-invalid') === 'true') reasons.add('页面标记为无效');
@@ -2561,6 +3123,19 @@
     return issues;
   }
 
+  // 摘要、撤销按钮、校验面板可能同时出现，各自固定定位会互相遮挡；
+  // 统一放进右下角纵向容器，按 order 自下而上堆叠：提示 → 撤销 → 校验面板
+  function getNoticeStack() {
+    let stack = document.getElementById('mock-ext-notice-stack');
+    if (!stack) {
+      stack = document.createElement('div');
+      stack.id = 'mock-ext-notice-stack';
+      stack.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:10000001;display:flex;flex-direction:column-reverse;align-items:flex-end;gap:8px;pointer-events:none;';
+      document.body.appendChild(stack);
+    }
+    return stack;
+  }
+
   function showValidationDiagnostics(issues) {
     const existing = document.getElementById('mock-ext-validation-diagnostics');
     if (existing) existing.remove();
@@ -2569,7 +3144,7 @@
     const panel = document.createElement('div');
     panel.id = 'mock-ext-validation-diagnostics';
     panel.style.cssText = [
-      'position:fixed', 'right:24px', 'bottom:76px', 'z-index:10000000', 'width:340px',
+      'order:2', 'width:340px', 'pointer-events:auto',
       'max-height:320px', 'overflow:auto', 'box-sizing:border-box', 'padding:14px',
       'border:1px solid #f3d19e', 'border-radius:6px', 'background:#fffaf0', 'color:#606266',
       'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif', 'font-size:13px',
@@ -2607,7 +3182,7 @@
       more.textContent = `另有 ${issues.length - 12} 项未展开`;
       panel.appendChild(more);
     }
-    document.body.appendChild(panel);
+    getNoticeStack().appendChild(panel);
   }
 
   function showOperationToast(message, success) {
@@ -2616,8 +3191,8 @@
     const toast = document.createElement('div');
     toast.id = 'mock-ext-operation-toast';
     toast.textContent = message;
-    toast.style.cssText = `position:fixed;right:24px;bottom:24px;z-index:10000001;padding:12px 16px;border-radius:6px;color:#fff;font-size:13px;background:${success ? '#67c23a' : '#e6a23c'};box-shadow:0 8px 22px rgba(0,0,0,.18);pointer-events:none;`;
-    document.body.appendChild(toast);
+    toast.style.cssText = `order:0;padding:12px 16px;border-radius:6px;color:#fff;font-size:13px;background:${success ? '#67c23a' : '#e6a23c'};box-shadow:0 8px 22px rgba(0,0,0,.18);pointer-events:none;`;
+    getNoticeStack().appendChild(toast);
     setTimeout(() => toast.remove(), 3200);
   }
 
@@ -2630,9 +3205,9 @@
     action.type = 'button';
     action.textContent = `撤销本次填充 (${operation.snapshots.length})`;
     action.title = '恢复本次填充前的字段状态';
-    action.style.cssText = 'position:fixed;right:24px;bottom:72px;z-index:10000001;padding:9px 12px;border:1px solid #c6e2ff;border-radius:6px;background:#ecf5ff;color:#409eff;font-size:13px;cursor:pointer;box-shadow:0 6px 16px rgba(0,0,0,.12);';
+    action.style.cssText = 'order:1;padding:9px 12px;border:1px solid #c6e2ff;border-radius:6px;background:#ecf5ff;color:#409eff;font-size:13px;cursor:pointer;box-shadow:0 6px 16px rgba(0,0,0,.12);pointer-events:auto;';
     action.onclick = () => undoLastFillOperation();
-    document.body.appendChild(action);
+    getNoticeStack().appendChild(action);
   }
 
   function undoLastFillOperation() {
@@ -2664,13 +3239,12 @@
       ? 'Auto Mock：未发现可填充字段'
       : `Auto Mock：已填充 ${result.filled} 项，跳过 ${result.skipped} 项${result.failed ? `，失败 ${result.failed} 项` : ''}${issueCount ? `，校验问题 ${issueCount} 项` : ''}`;
     toast.style.cssText = [
-      'position:fixed', 'right:24px', 'bottom:24px', 'z-index:10000000',
-      'padding:12px 16px', 'border-radius:6px', 'color:#fff', 'font-size:13px',
+      'order:0', 'padding:12px 16px', 'border-radius:6px', 'color:#fff', 'font-size:13px',
       'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
       `background:${result.filled ? '#67c23a' : '#e6a23c'}`,
       'box-shadow:0 8px 22px rgba(0,0,0,.18)', 'pointer-events:none'
     ].join(';');
-    document.body.appendChild(toast);
+    getNoticeStack().appendChild(toast);
     setTimeout(() => toast.remove(), 3200);
     showValidationDiagnostics(result.validationIssues);
   }
@@ -2694,20 +3268,31 @@
     const requestedRoot = options.root && isElementVisible(options.root) ? options.root : null;
     const activeDialogRoot = requestedRoot || getActiveDialogRoot();
     const session = options.session || createMockSession();
+    // 写入 session 而不是只看 options：后续弹窗续填复用同一 session，范围需保持一致
+    if (options.requiredOnly) session.requiredOnly = true;
     const operation = options.operation || session.operation || createFillOperation(options.silent ? 'dynamic' : 'batch');
     session.operation = operation;
+    if (batchFillRunning) return { total: 0, filled: 0, skipped: 0, failed: 0 };
     if (session.dynamicFillInProgress) return { total: 0, filled: 0, skipped: 0, failed: 0 };
 
     const fields = orderFieldsByCascadeDependency(
       collectFillableFields(activeDialogRoot || document)
         .filter(field => !session.handledFieldElements.has(field.inputEl))
+        .filter(field => !session.requiredOnly || isRequiredField(field.inputEl))
     );
     const result = { total: fields.length, filled: 0, skipped: 0, failed: 0 };
     session.dynamicFillInProgress = true;
+    batchFillRunning = true;
 
     try {
       for (let i = 0; i < fields.length; i++) {
         if (i > 0 && i % 5 === 0) await waitForRender(0);
+        // 编辑页补全：已有值的字段直接跳过，避免覆盖业务数据；异常值模式本意就是清空/改写，不受影响
+        if (CONFIG.FILL_ONLY_EMPTY === true && getValidationFillMode() !== 'invalid' && hasExistingFieldValue(fields[i].inputEl)) {
+          session.handledFieldElements.add(fields[i].inputEl);
+          result.skipped++;
+          continue;
+        }
         try {
           const snapshot = captureFieldSnapshot(fields[i].inputEl);
           const outcome = await fillField(fields[i].inputEl, session);
@@ -2716,7 +3301,9 @@
             rememberFilledFieldValue(session, fields[i].inputEl);
           } else result.skipped++;
           recordOperationSnapshot(operation, snapshot, outcome);
-          if (outcome.status === 'filled' || !shouldRetrySkippedField(fields[i].inputEl)) {
+          const attempts = (session.fieldAttemptCounts.get(fields[i].inputEl) || 0) + 1;
+          session.fieldAttemptCounts.set(fields[i].inputEl, attempts);
+          if (outcome.status === 'filled' || !shouldRetrySkippedField(fields[i].inputEl) || attempts >= MAX_DEFERRED_FIELD_ATTEMPTS) {
             session.handledFieldElements.add(fields[i].inputEl);
           }
         } catch (error) {
@@ -2728,8 +3315,11 @@
       }
     } finally {
       session.dynamicFillInProgress = false;
+      batchFillRunning = false;
     }
     if (!options.silent && CONFIG.VALIDATE_AFTER_FILL !== false) {
+      // ElFormItem 在 el.form.change 后异步校验，is-error 要等下一轮渲染才更新，立即读取会拿到旧状态
+      await waitForRender(120);
       result.validationIssues = validateFilledForm(activeDialogRoot || document);
     }
     if (!options.silent) {
@@ -2852,6 +3442,10 @@
         <label style="display:flex; align-items:center; gap:8px; margin:10px 0 0 100px; font-size:12px; color:#606266;">
           <input type="checkbox" id="setting-validate-after-fill"/>
           填充后检查必填、格式、范围和组件错误态
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; margin:10px 0 0 100px; font-size:12px; color:#606266;">
+          <input type="checkbox" id="setting-fill-only-empty"/>
+          批量填充时跳过已有值的字段
         </label>
         <div style="margin-top:14px; padding-top:12px; border-top:1px solid #d9ecff;">
           <div style="font-size:13px; font-weight:600; color:#409eff; margin-bottom:10px;">动态流程</div>
@@ -3030,6 +3624,7 @@
           '#setting-number-strategy',
           '#setting-validation-mode',
           '#setting-validate-after-fill',
+          '#setting-fill-only-empty',
           '#setting-option-retries',
           '#setting-option-delay',
           '#setting-dynamic-window',
@@ -3083,6 +3678,7 @@
 
     const toggleLabelMap = {
       '#setting-validate-after-fill': ['填充后自动校验', '检查必填、格式、范围和组件错误态。'],
+      '#setting-fill-only-empty': ['只填空字段', '批量填充时保留已有值，适合编辑页补全，避免覆盖业务数据。'],
       '#setting-ai-manual-mode': ['保留 AI 推荐快捷键', '选中字段后，通过快捷键刷新当前字段的推荐类目。'],
       '#setting-ai-enable-classification': ['启用 AI 类目推荐', '关闭后仅使用本地兜底推荐，不会发起请求。'],
       '#setting-ai-enable-preload': ['启用 AI 预加载分类', '关闭后仅在打开弹窗时按需请求。'],
@@ -3203,6 +3799,7 @@
       numberStrategy: panel.querySelector('#setting-number-strategy'),
       validationMode: panel.querySelector('#setting-validation-mode'),
       validateAfterFill: panel.querySelector('#setting-validate-after-fill'),
+      fillOnlyEmpty: panel.querySelector('#setting-fill-only-empty'),
       optionRetries: panel.querySelector('#setting-option-retries'),
       optionDelay: panel.querySelector('#setting-option-delay'),
       dynamicWindow: panel.querySelector('#setting-dynamic-window'),
@@ -3271,6 +3868,7 @@
     settings.numberStrategy.value = CONFIG.NUMBER_FILL_STRATEGY === 'boundary' ? 'boundary' : 'normal';
     settings.validationMode.value = getValidationFillMode();
     settings.validateAfterFill.checked = CONFIG.VALIDATE_AFTER_FILL !== false;
+    settings.fillOnlyEmpty.checked = CONFIG.FILL_ONLY_EMPTY === true;
     settings.optionRetries.value = getBoundedConfigNumber(CONFIG.REMOTE_OPTION_RETRY_COUNT, 4, 0, 10);
     settings.optionDelay.value = getBoundedConfigNumber(CONFIG.REMOTE_OPTION_RETRY_DELAY_MS, 250, 50, 2000);
     settings.dynamicWindow.value = getBoundedConfigNumber(CONFIG.DYNAMIC_FILL_WINDOW_MS, 8000, 1000, 60000);
@@ -3320,23 +3918,40 @@
     };
     settings.cancel.onclick = closeSettings;
     settings.save.onclick = () => {
-      CONFIG.SHORTCUT_SPOTLIGHT = settings.shortcutSpotlight.value.toLowerCase() || 'x';
-      CONFIG.SHORTCUT_FILL_ALL = settings.shortcutFillAll.value.toLowerCase() || 'z';
-      CONFIG.SHORTCUT_AI_TRIGGER = settings.shortcutAiTrigger.value.toLowerCase() || 's';
+      const readShortcut = (value, fallback) => String(value || '').trim().toLowerCase() || fallback;
+      const nextSpotlight = readShortcut(settings.shortcutSpotlight.value, 'x');
+      const nextFillAll = readShortcut(settings.shortcutFillAll.value, 'z');
+      const nextAiTrigger = readShortcut(settings.shortcutAiTrigger.value, 's');
+      const shortcutValues = [nextSpotlight, nextFillAll, nextAiTrigger];
+      if (new Set(shortcutValues).size !== shortcutValues.length) {
+        alert('三个快捷键不能重复，请修改后再保存。');
+        return;
+      }
+      // 所有校验通过后再统一写回，避免校验失败时内存配置已被部分修改
+      const nextConfig = { ...CONFIG };
+      nextConfig.SHORTCUT_SPOTLIGHT = nextSpotlight;
+      nextConfig.SHORTCUT_FILL_ALL = nextFillAll;
+      nextConfig.SHORTCUT_AI_TRIGGER = nextAiTrigger;
       const ignores = settings.ignoreKeywords.value.split(',').map(s => s.trim()).filter(Boolean);
-      CONFIG.IGNORE_KEYWORDS = ignores.length ? ignores : DEFAULT_CONFIG.IGNORE_KEYWORDS;
-      CONFIG.AI_MANUAL_TRIGGER_MODE = settings.aiManualMode.checked;
-      CONFIG.AI_ENABLE_CLASSIFICATION = settings.aiClassification.checked;
-      CONFIG.AI_ENABLE_PRELOAD = settings.aiPreload.checked;
-      
+      nextConfig.IGNORE_KEYWORDS = ignores.length ? ignores : DEFAULT_CONFIG.IGNORE_KEYWORDS;
+      nextConfig.AI_MANUAL_TRIGGER_MODE = settings.aiManualMode.checked;
+      nextConfig.AI_ENABLE_CLASSIFICATION = settings.aiClassification.checked;
+      nextConfig.AI_ENABLE_PRELOAD = settings.aiPreload.checked;
+
       const dictText = settings.customDicts.value.trim();
       let parsedDicts = [];
       if (dictText) {
         try {
           parsedDicts = JSON.parse(dictText);
-          if (!Array.isArray(parsedDicts)) throw new Error("Not an array");
+          if (!Array.isArray(parsedDicts)) throw new Error('必须是 JSON 数组');
+          parsedDicts.forEach((dict, index) => {
+            if (!dict || typeof dict !== 'object') throw new Error(`第 ${index + 1} 项必须是对象`);
+            if (typeof dict.regex !== 'string' || !dict.regex.trim()) throw new Error(`第 ${index + 1} 项缺少 regex`);
+            new RegExp(dict.regex);
+            if (!Array.isArray(dict.values) || dict.values.length === 0) throw new Error(`第 ${index + 1} 项 values 必须是非空数组`);
+          });
         } catch (e) {
-          alert("自定义字典 JSON 格式错误，请检查！\n" + e.message);
+          alert('自定义字典格式错误：\n' + e.message);
           return;
         }
       }
@@ -3348,39 +3963,42 @@
         alert(`站点规则 JSON 格式错误，请检查！\n${error.message}`);
         return;
       }
-      CONFIG.CUSTOM_DICTS = parsedDicts;
-      CONFIG.SITE_RULES = parsedSiteRules;
-      CONFIG.DATA_PROFILE = DATA_PROFILES[settings.dataProfile.value] ? settings.dataProfile.value : 'general';
-      CONFIG.RANDOM_SEED = settings.randomSeed.value.trim();
-      CONFIG.NUMBER_FILL_STRATEGY = settings.numberStrategy.value === 'boundary' ? 'boundary' : 'normal';
-      CONFIG.FILL_VALIDATION_MODE = ['normal', 'boundary', 'invalid'].includes(settings.validationMode.value)
+      nextConfig.CUSTOM_DICTS = parsedDicts;
+      nextConfig.SITE_RULES = parsedSiteRules;
+      nextConfig.DATA_PROFILE = DATA_PROFILES[settings.dataProfile.value] ? settings.dataProfile.value : 'general';
+      nextConfig.RANDOM_SEED = settings.randomSeed.value.trim();
+      nextConfig.NUMBER_FILL_STRATEGY = settings.numberStrategy.value === 'boundary' ? 'boundary' : 'normal';
+      nextConfig.FILL_VALIDATION_MODE = ['normal', 'boundary', 'invalid'].includes(settings.validationMode.value)
         ? settings.validationMode.value
         : 'normal';
-      CONFIG.VALIDATE_AFTER_FILL = settings.validateAfterFill.checked;
-      CONFIG.REMOTE_OPTION_RETRY_COUNT = getBoundedConfigNumber(settings.optionRetries.value, 4, 0, 10);
-      CONFIG.REMOTE_OPTION_RETRY_DELAY_MS = getBoundedConfigNumber(settings.optionDelay.value, 250, 50, 2000);
-      CONFIG.DYNAMIC_FILL_WINDOW_MS = getBoundedConfigNumber(settings.dynamicWindow.value, 8000, 1000, 60000);
-      CONFIG.DYNAMIC_FILL_MAX_DIALOG_STEPS = getBoundedConfigNumber(settings.dialogSteps.value, 3, 1, 10);
-      CONFIG.DEEPSEEK_API_URL = settings.apiUrl.value.trim() || 'https://api.deepseek.com/v1/chat/completions';
-      CONFIG.DEEPSEEK_API_MODEL = settings.apiModel.value.trim() || 'deepseek-v4-flash';
+      nextConfig.VALIDATE_AFTER_FILL = settings.validateAfterFill.checked;
+      nextConfig.FILL_ONLY_EMPTY = settings.fillOnlyEmpty.checked;
+      nextConfig.REMOTE_OPTION_RETRY_COUNT = getBoundedConfigNumber(settings.optionRetries.value, 4, 0, 10);
+      nextConfig.REMOTE_OPTION_RETRY_DELAY_MS = getBoundedConfigNumber(settings.optionDelay.value, 250, 50, 2000);
+      nextConfig.DYNAMIC_FILL_WINDOW_MS = getBoundedConfigNumber(settings.dynamicWindow.value, 8000, 1000, 60000);
+      nextConfig.DYNAMIC_FILL_MAX_DIALOG_STEPS = getBoundedConfigNumber(settings.dialogSteps.value, 3, 1, 10);
+      nextConfig.DEEPSEEK_API_URL = settings.apiUrl.value.trim() || 'https://api.deepseek.com/v1/chat/completions';
+      nextConfig.DEEPSEEK_API_MODEL = settings.apiModel.value.trim() || 'deepseek-v4-flash';
       const nextApiKey = settings.apiKey.value.trim();
       if (settings.clearApiKey.checked) {
-        CONFIG.DEEPSEEK_API_KEY = '';
+        nextConfig.DEEPSEEK_API_KEY = '';
       } else if (nextApiKey) {
-        CONFIG.DEEPSEEK_API_KEY = nextApiKey;
+        nextConfig.DEEPSEEK_API_KEY = nextApiKey;
       }
 
+      Object.assign(CONFIG, nextConfig);
       if (typeof GM_setValue !== 'undefined') {
         GM_setValue('auto_mock_config', CONFIG);
       }
       closeSettings();
-      alert('✅ 高级偏好设置已保存！');
+      showOperationToast('✅ 高级偏好设置已保存', true);
     };
     requestAnimationFrame(() => close.focus());
   }
 
   if (typeof GM_registerMenuCommand !== 'undefined') {
     GM_registerMenuCommand('⚡ 一键填充当前表单', () => fillElementUiForms());
+    GM_registerMenuCommand('✱ 仅填充必填项', () => fillElementUiForms({ requiredOnly: true }));
     GM_registerMenuCommand('⚙️ 高级偏好设置', openSettingsUI);
     GM_registerMenuCommand('↶ 撤销最近一次填充', undoLastFillOperation);
   }
