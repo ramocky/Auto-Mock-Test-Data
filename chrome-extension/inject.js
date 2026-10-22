@@ -9,12 +9,15 @@
     SHORTCUT_FILL_ALL: 'z',
     SHORTCUT_AI_TRIGGER: 's',
     AI_MANUAL_TRIGGER_MODE: true,
+    // AI_ENABLED 由 content.js 根据是否配置 API Key 计算，页面侧不再持有密钥
+    AI_ENABLED: false,
+    AI_ENABLE_CLASSIFICATION: true,
     IGNORE_KEYWORDS: ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'],
-    CUSTOM_DICTS: [],
-    DEEPSEEK_API_URL: 'https://api.deepseek.com/v1/chat/completions',
-    DEEPSEEK_API_MODEL: 'deepseek-v4-flash',
-    DEEPSEEK_API_KEY: ''
+    CUSTOM_DICTS: []
   };
+
+  const AI_REQUEST_TIMEOUT_MS = 15000;
+  const DEEPSEEK_CACHE_LIMIT = 100;
 
   // ==========================================
   // 1. 高阶内置 Mock 数据工厂 (Mock Engine)
@@ -89,6 +92,7 @@
       const char2 = chars.charAt(Math.floor(Math.random() * chars.length));
       return cities[Math.floor(Math.random() * cities.length)] + char1 + char2 + names[Math.floor(Math.random() * names.length)] + '有限公司';
     },
+    accountName: () => 'test_' + Math.random().toString(36).slice(2, 10),
     licensePlate: () => {
       const provs = ['京','沪','粤','闽','浙','苏','川','鲁'];
       const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -128,12 +132,41 @@
     color: () => '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')
   };
 
+  // cmd 与中文类目名的映射，供 Spotlight 渲染与本地生成共用
+  // 新增或删除类目时需同步 background.js 的 AI_CMD_CATALOG
+  const MOCK_CMD_LABELS = {
+    name: '人名',
+    englishName: '英文名',
+    age: '年龄',
+    phone: '手机号',
+    email: '邮箱',
+    idcard: '身份证',
+    bankCard: '银行卡',
+    accountName: '账号名称',
+    title: '职务头衔',
+    address: '详细地址',
+    url: '随机链接',
+    number: '随机数字',
+    amount: '金额数值',
+    color: '颜色值',
+    date: '日期',
+    time: '时间',
+    text: '长文本段落',
+    creditCode: '信用代码',
+    company: '企业名称',
+    licensePlate: '车牌号',
+    zipCode: '邮政编码',
+    ipv4: 'IP地址',
+    mac: 'MAC地址',
+    password: '强密码'
+  };
+
   const predictMockType = (label) => {
     label = (label || '').toLowerCase();
     if (CONFIG.CUSTOM_DICTS && CONFIG.CUSTOM_DICTS.length > 0) {
       for (let i = 0; i < CONFIG.CUSTOM_DICTS.length; i++) {
         let dict = CONFIG.CUSTOM_DICTS[i];
-        if (dict.regex) {
+        if (dict && dict.regex) {
           try {
             if (new RegExp(dict.regex, 'i').test(label)) {
               return { cmd: '__custom_' + i, name: dict.label || '自定义值' };
@@ -144,28 +177,32 @@
         }
       }
     }
-    if (/姓名|名字|人名|称呼|人|name|user/.test(label)) return {cmd: 'name', name: '人名'};
-    if (/英文名|english/.test(label)) return {cmd: 'englishName', name: '英文名'};
-    if (/手机|电话|联系方式|联系号码|phone|mobile|tel/.test(label)) return {cmd: 'phone', name: '手机号'};
-    if (/邮箱|邮件|email|e-mail|mail/.test(label)) return {cmd: 'email', name: '邮箱'};
+    // 先匹配更具体的规则，避免「联系人电话」被「人」抢先判成人名
+    if (/英文名|英文姓名|english/.test(label)) return {cmd: 'englishName', name: '英文名'};
+    if (/手机|电话|联系方式|联系号码|phone|mobile|(^|[^a-z])tel([^a-z]|$)/.test(label)) return {cmd: 'phone', name: '手机号'};
+    if (/邮箱|邮件|e-mail|email|(^|[^a-z])mail([^a-z]|$)/.test(label)) return {cmd: 'email', name: '邮箱'};
     if (/身份证|证件号|idcard|id_card/.test(label)) return {cmd: 'idcard', name: '身份证'};
-    if (/年龄|age/.test(label)) return {cmd: 'age', name: '年龄'};
+    if (/年龄|(^|[^a-z])age([^a-z]|$)/.test(label)) return {cmd: 'age', name: '年龄'};
     if (/信用代码|企业代码|credit/.test(label)) return {cmd: 'creditCode', name: '信用代码'};
     if (/公司|企业|单位|company/.test(label)) return {cmd: 'company', name: '企业名称'};
     if (/车牌|license_plate/.test(label)) return {cmd: 'licensePlate', name: '车牌号'};
     if (/邮编|zipcode|postal/.test(label)) return {cmd: 'zipCode', name: '邮政编码'};
     if (/ip地址|ipv4|ip_/.test(label)) return {cmd: 'ipv4', name: 'IP地址'};
-    if (/mac|物理地址/.test(label)) return {cmd: 'mac', name: 'MAC地址'};
+    if (/(^|[^a-z])mac([^a-z]|$)|物理地址/.test(label)) return {cmd: 'mac', name: 'MAC地址'};
     if (/密码|password|pwd/.test(label)) return {cmd: 'password', name: '强密码'};
     if (/颜色|color/.test(label)) return {cmd: 'color', name: '颜色值'};
-    if (/卡号|银行卡|账号|account|card/.test(label)) return {cmd: 'bankCard', name: '银行卡'};
-    if (/头衔|职务|岗位|职位|职称|title|position|job/.test(label)) return {cmd: 'title', name: '职务头衔'};
-    if (/地址|地点|区域|省|市|区|address|location|region/.test(label)) return {cmd: 'address', name: '详细地址'};
+    if (/银行卡|银行账号|银行账户|卡号|bankcard|bank_card/.test(label)) return {cmd: 'bankCard', name: '银行卡'};
+    if (/账号|账户|用户名|登录名|account|username|login/.test(label)) return {cmd: 'accountName', name: '账号名称'};
+    if (/头衔|职务|岗位|职位|职称|title|position|(^|[^a-z])job([^a-z]|$)/.test(label)) return {cmd: 'title', name: '职务头衔'};
+    if (/日期|date/.test(label)) return {cmd: 'date', name: '日期'};
+    if (/时间|time/.test(label)) return {cmd: 'time', name: '时间'};
+    if (/地址|住址|地点|省份|城市|区域|省|市|区|address|location|region/.test(label)) return {cmd: 'address', name: '详细地址'};
     if (/网址|链接|主页|url|website|link/.test(label)) return {cmd: 'url', name: '随机链接'};
-    if (/日期|时间|date|time/.test(label)) return {cmd: 'date', name: '日期'};
     if (/文本|描述|备注|详情|内容|text|desc|content|remark/.test(label)) return {cmd: 'text', name: '文本段落'};
-    if (/金额|钱|元|amount|money/.test(label)) return {cmd: 'amount', name: '金额'};
-    if (/数字|数量|金额|库存|总数|价格|num|count|price/.test(label)) return {cmd: 'number', name: '数字'};
+    if (/金额|钱|amount|money/.test(label)) return {cmd: 'amount', name: '金额'};
+    if (/数字|数量|库存|总数|价格|(^|[^a-z])num([^a-z]|$)|count|price/.test(label)) return {cmd: 'number', name: '数字'};
+    // 人名规则放在最后，避免单字「人」误伤联系人电话、人员编号等字段
+    if (/姓名|名字|人名|称呼|联系人|负责人|收件人|持卡人|真实姓名|法人|客户名|(^|[^a-z])name([^a-z]|$)|(^|[^a-z])user([^a-z]|$)/.test(label)) return {cmd: 'name', name: '人名'};
     return null;
   };
 
@@ -186,10 +223,41 @@
   // ==========================================
   // 3. 业务组件自定义挂载钩子 (Custom Component Hooks)
   // ==========================================
+  function formatDateValue(date, format) {
+    const pad = (num) => String(num).padStart(2, '0');
+    const tokens = {
+      yyyy: date.getFullYear(),
+      YYYY: date.getFullYear(),
+      MM: pad(date.getMonth() + 1),
+      dd: pad(date.getDate()),
+      DD: pad(date.getDate()),
+      HH: pad(date.getHours()),
+      mm: pad(date.getMinutes()),
+      ss: pad(date.getSeconds())
+    };
+    return String(format || 'yyyy-MM-dd HH:mm:ss').replace(/yyyy|YYYY|MM|dd|DD|HH|mm|ss/g, (token) => tokens[token]);
+  }
+
+  function pickCascaderLeafPath(options) {
+    const list = (options || []).filter(opt => opt && !opt.disabled && opt.value !== undefined && opt.value !== null);
+    if (list.length === 0) return null;
+
+    // 随机顺序尝试，避免选中的父节点下全是禁用项导致整体填充失败
+    const shuffled = list.slice().sort(() => Math.random() - 0.5);
+    for (let i = 0; i < shuffled.length; i++) {
+      const opt = shuffled[i];
+      const children = Array.isArray(opt.children) ? opt.children : [];
+      if (children.length === 0) return { values: [opt.value] };
+      const childPath = pickCascaderLeafPath(children);
+      if (childPath) return { values: [opt.value].concat(childPath.values) };
+    }
+    return null;
+  }
+
   const CustomHooks = {
     ElSelect: (vueInstance) => {
       if (vueInstance.options && vueInstance.options.length > 0) {
-        const validOptions = vueInstance.options.filter(opt => !opt.disabled);
+        const validOptions = vueInstance.options.filter(opt => !opt.disabled && opt.value !== undefined && opt.value !== null);
         if (validOptions.length > 0) {
           const randomOpt = validOptions[Math.floor(Math.random() * validOptions.length)];
           vueInstance.$emit('input', randomOpt.value);
@@ -199,16 +267,55 @@
       }
       return false;
     },
+    ElCascader: (vueInstance) => {
+      // 懒加载级联在展开前拿不到叶子节点，避免填入无效的父级值
+      if (vueInstance.lazyLoad) return false;
+      const leafPath = pickCascaderLeafPath(vueInstance.options);
+      if (!leafPath) return false;
+      const values = leafPath.values;
+      const finalValue = vueInstance.emitPath === false ? values[values.length - 1] : values;
+      vueInstance.$emit('input', finalValue);
+      vueInstance.$emit('change', finalValue);
+      return true;
+    },
     ElDatePicker: (vueInstance) => {
       const now = new Date();
-      vueInstance.$emit('input', now);
-      vueInstance.$emit('change', now);
+      const valueFormat = vueInstance.valueFormat;
+      const pickerType = String(vueInstance.type || '');
+      if (pickerType.indexOf('range') > -1) {
+        const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        const rangeValue = valueFormat
+          ? [formatDateValue(start, valueFormat), formatDateValue(now, valueFormat)]
+          : [start, now];
+        vueInstance.$emit('input', rangeValue);
+        vueInstance.$emit('change', rangeValue);
+      } else if (pickerType === 'dates' || pickerType === 'months' || pickerType === 'years') {
+        // 多选日期类型的 v-model 期望数组
+        const multiValue = valueFormat ? formatDateValue(now, valueFormat) : now;
+        vueInstance.$emit('input', [multiValue]);
+        vueInstance.$emit('change', [multiValue]);
+      } else {
+        const value = valueFormat ? formatDateValue(now, valueFormat) : now;
+        vueInstance.$emit('input', value);
+        vueInstance.$emit('change', value);
+      }
       return true;
     },
     ElTimePicker: (vueInstance) => {
       const now = new Date();
-      vueInstance.$emit('input', now);
-      vueInstance.$emit('change', now);
+      const valueFormat = vueInstance.valueFormat;
+      const value = valueFormat ? formatDateValue(now, valueFormat) : now;
+      if (vueInstance.isRange) {
+        const start = new Date(now.getTime() - 60 * 60 * 1000);
+        const rangeValue = valueFormat
+          ? [formatDateValue(start, valueFormat), value]
+          : [start, now];
+        vueInstance.$emit('input', rangeValue);
+        vueInstance.$emit('change', rangeValue);
+      } else {
+        vueInstance.$emit('input', value);
+        vueInstance.$emit('change', value);
+      }
       return true;
     },
     ElSwitch: (vueInstance) => {
@@ -232,18 +339,19 @@
 
   const LocalHookDisplayNames = {
     ElSelect: '推荐选项',
+    ElCascader: '推荐选项',
     ElRadioGroup: '推荐选项',
     ElDatePicker: '当前日期',
     ElTimePicker: '当前时间',
     ElSwitch: '开启状态'
   };
 
-  function isAiManualMode() {
-    return Boolean(CONFIG.DEEPSEEK_API_KEY) && CONFIG.AI_MANUAL_TRIGGER_MODE !== false;
+  function isAiAvailable() {
+    return CONFIG.AI_ENABLED === true && CONFIG.AI_ENABLE_CLASSIFICATION !== false;
   }
 
-  function getAiShortcutText() {
-    return `Alt+${(CONFIG.SHORTCUT_AI_TRIGGER || 's').toUpperCase()}`;
+  function isAiManualMode() {
+    return CONFIG.AI_MANUAL_TRIGGER_MODE !== false;
   }
 
   function isAiSuggestionComponent(componentName) {
@@ -251,7 +359,7 @@
   }
 
   function isLocalOnlyHookComponent(componentName) {
-    return componentName === 'ElDatePicker' || componentName === 'ElTimePicker' || componentName === 'ElSwitch';
+    return componentName === 'ElDatePicker' || componentName === 'ElTimePicker' || componentName === 'ElSwitch' || componentName === 'ElCascader';
   }
 
   function createHookFillAction(vueInstance, componentName, labelText) {
@@ -272,7 +380,7 @@
 
     if (componentName === 'ElSelect' && Array.isArray(vueInstance.options)) {
       return vueInstance.options
-        .filter(opt => opt && !opt.disabled)
+        .filter(opt => opt && !opt.disabled && opt.value !== undefined && opt.value !== null)
         .map(opt => ({
           label: String(opt.currentLabel || opt.label || opt.value || '').trim(),
           value: opt.value,
@@ -301,16 +409,6 @@
     }
 
     return [];
-  }
-
-  function buildAiPromptText(labelText, vueInstance, componentName) {
-    if (!isAiSuggestionComponent(componentName)) return labelText;
-
-    const options = getCandidateOptions(vueInstance, componentName);
-    if (options.length === 0) return labelText;
-
-    const optionLabels = options.slice(0, 20).map(opt => opt.label);
-    return `${labelText}\n候选项：${optionLabels.join('、')}\n请只返回候选项中的一个原文，不要解释。`;
   }
 
   function matchAiSuggestionToOption(aiText, vueInstance, componentName) {
@@ -349,40 +447,91 @@
   }
 
   // === DeepSeek 通信核心 ===
+  // 页面侧只发送字段名与候选项，API Key/URL/模型与提示词全部由扩展侧持有
   const deepseekCache = new Map();
   let deepseekReqIdCount = 0;
 
-  function askDeepSeek(label, promptText) {
+  function cacheDeepSeekResult(key, value) {
+    if (deepseekCache.has(key)) deepseekCache.delete(key);
+    deepseekCache.set(key, value);
+    while (deepseekCache.size > DEEPSEEK_CACHE_LIMIT) {
+      const oldestKey = deepseekCache.keys().next().value;
+      deepseekCache.delete(oldestKey);
+    }
+  }
+
+  function parseAiCommand(rawText) {
+    const text = String(rawText == null ? '' : rawText).trim();
+    if (!text) return '';
+    const cleaned = text.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').trim();
+    const candidates = [];
+    try {
+      const parsed = JSON.parse(cleaned);
+      if (Array.isArray(parsed)) {
+        candidates.push.apply(candidates, parsed);
+      } else {
+        candidates.push(parsed);
+      }
+    } catch (e) {
+      // 非严格 JSON 时继续用正则提取
+    }
+    const cmdMatch = cleaned.match(/"cmd"\s*:\s*"([^"]+)"/);
+    if (cmdMatch) candidates.push({ cmd: cmdMatch[1] });
+    for (let i = 0; i < candidates.length; i++) {
+      const item = candidates[i];
+      const cmd = typeof item === 'string' ? item : (item && (item.cmd || item.command || item.type));
+      if (cmd && (MockFactory[cmd] || String(cmd).indexOf('__custom_') === 0)) {
+        return String(cmd);
+      }
+    }
+    const bareMatch = cleaned.match(/^["'\s]*([a-zA-Z][a-zA-Z0-9_]*)["'\s]*$/);
+    if (bareMatch && MockFactory[bareMatch[1]]) return bareMatch[1];
+    return '';
+  }
+
+  function askDeepSeek(label, optionLabels) {
+    const promptKey = label + '||' + (optionLabels || []).join('|');
+    if (deepseekCache.has(promptKey)) return Promise.resolve(deepseekCache.get(promptKey));
+
     return new Promise((resolve) => {
-      if (!CONFIG.DEEPSEEK_API_KEY) return resolve(null);
-      const promptKey = promptText || label;
-      if (deepseekCache.has(promptKey)) return resolve(deepseekCache.get(promptKey));
-      
+      if (!isAiAvailable()) return resolve(null);
+
       const reqId = 'ds_' + (++deepseekReqIdCount);
-      console.log(`[AutoMock AI] 发起请求: 字段名="${label}" (reqId=${reqId})`);
+      let settled = false;
+      let timer = null;
+
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('message', listener);
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      };
+
       const listener = (event) => {
         if (event.source !== window || !event.data) return;
-        if (event.data.type === "DEEPSEEK_RESPONSE" && event.data.reqId === reqId) {
-          window.removeEventListener("message", listener);
-          const response = event.data.response;
-          console.log(`[AutoMock AI] 收到后台响应:`, response);
-          if (response && response.success && response.data) {
-            console.log(`[AutoMock AI] 成功提取:`, response.data);
-            deepseekCache.set(promptKey, response.data);
-            resolve(response.data);
-          } else {
-            console.error("[AutoMock AI] AI 请求失败:", response ? response.error : "No response");
-            resolve({ error: (response && response.error) ? String(response.error) : "未知API错误" });
-          }
+        if (event.data.type !== 'DEEPSEEK_RESPONSE' || event.data.reqId !== reqId) return;
+        const response = event.data.response;
+        if (response && response.success && response.data) {
+          cacheDeepSeekResult(promptKey, response.data);
+          finish(response.data);
+        } else {
+          console.warn('[AutoMock AI] 请求失败:', response ? response.error : '无响应');
+          finish(null);
         }
       };
-      window.addEventListener("message", listener);
-      window.postMessage({ type: "DEEPSEEK_REQUEST", reqId: reqId, payload: { 
-        apiKey: CONFIG.DEEPSEEK_API_KEY, 
-        apiUrl: CONFIG.DEEPSEEK_API_URL,
-        modelName: CONFIG.DEEPSEEK_API_MODEL,
-        label: promptKey 
-      } }, "*");
+
+      timer = setTimeout(() => {
+        console.warn('[AutoMock AI] 请求超时，已回退本地规则');
+        finish(null);
+      }, AI_REQUEST_TIMEOUT_MS);
+
+      window.addEventListener('message', listener);
+      window.postMessage({
+        type: 'DEEPSEEK_REQUEST',
+        reqId: reqId,
+        payload: { label: label, options: optionLabels || [] }
+      }, '*');
     });
   }
 
@@ -479,6 +628,30 @@
   }
 
 
+  function isIgnoredByKeywords(labelText, vModelExpr) {
+    const ignoreList = CONFIG.IGNORE_KEYWORDS || [];
+    const labelLower = String(labelText == null ? '' : labelText).toLowerCase();
+    const modelExpr = String(vModelExpr == null ? '' : vModelExpr);
+
+    return ignoreList.some(keyword => {
+      const kw = String(keyword == null ? '' : keyword).trim();
+      if (!kw) return false;
+      const kwLower = kw.toLowerCase();
+      if (labelLower.includes(kwLower)) return true;
+      if (!modelExpr) return false;
+
+      // 纯 id 关键字按词边界匹配，避免 idCard、isValid 等字段被误跳过
+      if (kwLower === 'id') {
+        return /(^|[^A-Za-z0-9])id([^A-Za-z0-9]|$)/.test(modelExpr)
+          || /[a-z0-9]Id([A-Z0-9]|$)/.test(modelExpr)
+          || /(^|[^A-Za-z0-9])ID([^A-Za-z0-9]|$)/.test(modelExpr)
+          || /[a-z0-9]ID([A-Z0-9]|$)/.test(modelExpr);
+      }
+
+      return modelExpr.toLowerCase().includes(kwLower);
+    });
+  }
+
   function getFieldContext(inputEl) {
     if (!inputEl || (inputEl.tagName !== 'INPUT' && inputEl.tagName !== 'TEXTAREA')) return null;
 
@@ -496,14 +669,7 @@
       vModelExpr = vueInstance.$vnode.data.model.expression || '';
     }
 
-    const ignoreList = CONFIG.IGNORE_KEYWORDS || ['id', '创建', '更新', '主键', '忽略', '只读', '序号', 'id_', '_id', 'created', 'updated'];
-    const labelLower = labelText.toLowerCase();
-    const modelLower = vModelExpr.toLowerCase();
-    const isIgnored = ignoreList.some(keyword => {
-      const kw = String(keyword == null ? '' : keyword).toLowerCase();
-      return kw && (labelLower.includes(kw) || (modelLower && modelLower.includes(kw)));
-    });
-    if (isIgnored) return null;
+    if (isIgnoredByKeywords(labelText, vModelExpr)) return null;
 
     const hookAction = createHookFillAction(vueInstance, componentName, labelText);
     return {
@@ -559,25 +725,27 @@
     if (typeof aiVal === 'string' && aiVal.trim()) {
       if (supportsAiSuggestion) {
         const matchedOption = matchAiSuggestionToOption(aiVal, vueInstance, componentName);
-        if (matchedOption) {
-          return matchedOption.apply();
-        }
+        if (matchedOption) return matchedOption.apply();
         if (hookAction) {
-          console.warn(`[AutoMock AI] 未命中候选项，已改用${localHookName}:`, aiVal);
+          console.warn(`[AutoMock AI] 未命中候选项，已改用${localHookName}`);
           return hookAction();
         }
-        console.warn('[AutoMock AI] 未命中候选项，未执行写入:', aiVal);
         return false;
       }
 
-      fillElement(inputEl, aiVal);
-      return true;
+      const aiCmd = parseAiCommand(aiVal);
+      if (aiCmd) return applyDirectCommandToInput(inputEl, aiCmd);
+      console.warn('[AutoMock AI] 未解析出可用命令，已回退本地规则:', aiVal);
     }
 
-    if (aiVal && aiVal.error) {
-      console.warn('[AutoMock AI] 返回结果不可直接填入:', aiVal.error);
-    }
     return applyLocalFallback(context);
+  }
+
+  function getAiOptionLabels(context) {
+    if (!context.supportsAiSuggestion) return [];
+    return getCandidateOptions(context.vueInstance, context.componentName)
+      .map(opt => opt.label)
+      .slice(0, 20);
   }
 
   async function fillFieldDirectly(inputEl, options = {}) {
@@ -586,12 +754,11 @@
     if (!context) return false;
 
     spotlightTargetElement = inputEl;
-    if (CONFIG.DEEPSEEK_API_KEY && !isLocalOnlyHookComponent(context.componentName)) {
+    if (isAiAvailable() && !isLocalOnlyHookComponent(context.componentName)) {
       const requestId = ++currentAiRequestId;
-      const aiPromptText = buildAiPromptText(context.labelText, context.vueInstance, context.componentName);
-      const aiVal = await askDeepSeek(context.labelText, aiPromptText);
+      const aiVal = await askDeepSeek(context.labelText, getAiOptionLabels(context));
       if (requestId !== currentAiRequestId) return false;
-      return applyAiResultToField(context, aiVal);
+      if (aiVal) return applyAiResultToField(context, aiVal);
     }
 
     if (aiOnly) return false;
@@ -599,10 +766,13 @@
   }
 
   function triggerFocusedFieldAi() {
-    if (!CONFIG.DEEPSEEK_API_KEY) return;
     const target = spotlightTargetElement || document.activeElement;
     if (!target || (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA')) return;
-    fillFieldDirectly(target, { aiOnly: false }).catch(err => {
+
+    const useLocalOnly = !isAiAvailable();
+    fillFieldDirectly(target, { aiOnly: false }).then((filled) => {
+      if (useLocalOnly && filled) showToast('未启用 AI，已按本地规则填充');
+    }).catch(err => {
       console.error('[AutoMock AI] 快捷键直填失败:', err);
     });
   }
@@ -611,7 +781,7 @@
   document.addEventListener('focusin', (e) => {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
       spotlightTargetElement = e.target;
-      if (CONFIG.DEEPSEEK_API_KEY && !isAiManualMode()) {
+      if (isAiAvailable() && !isAiManualMode()) {
         const target = e.target;
         setTimeout(() => {
           if (spotlightTargetElement !== target) return;
@@ -651,68 +821,45 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     `;
     
-    // 自定义滚动条样式
-    const style = document.createElement('style');
-    style.innerHTML = `
-      #mock-ext-spotlight > div::-webkit-scrollbar { width: 6px; }
-      #mock-ext-spotlight > div::-webkit-scrollbar-thumb { background: #dcdfe6; border-radius: 3px; }
-      #mock-ext-spotlight > div::-webkit-scrollbar-thumb:hover { background: #c0c4cc; }
-    `;
-    document.head.appendChild(style);
+    // 自定义滚动条样式，重复打开时只保留一份
+    if (!document.getElementById('mock-ext-spotlight-style')) {
+      const style = document.createElement('style');
+      style.id = 'mock-ext-spotlight-style';
+      style.innerHTML = `
+        #mock-ext-spotlight > div::-webkit-scrollbar { width: 6px; }
+        #mock-ext-spotlight > div::-webkit-scrollbar-thumb { background: #dcdfe6; border-radius: 3px; }
+        #mock-ext-spotlight > div::-webkit-scrollbar-thumb:hover { background: #c0c4cc; }
+      `;
+      document.head.appendChild(style);
+    }
     
     const title = document.createElement('div');
     title.innerText = '⚡ 选择要填入的数据格式';
     title.style.cssText = 'font-size: 16px; color: #333; margin-bottom: 20px; font-weight: bold; user-select: none; text-align: center;';
     panel.appendChild(title);
 
+    const toSpotlightItems = (cmds) => cmds.map(cmd => ({ label: MOCK_CMD_LABELS[cmd] || cmd, cmd: cmd }));
     let mockGroups = [
       {
         title: '👤 个人信息',
-        items: [
-          { label: '人名', cmd: 'name' },
-          { label: '英文名', cmd: 'englishName' },
-          { label: '身份证', cmd: 'idcard' },
-          { label: '年龄', cmd: 'age' },
-          { label: '手机号', cmd: 'phone' },
-          { label: '邮箱', cmd: 'email' }
-        ]
+        items: toSpotlightItems(['name', 'englishName', 'idcard', 'age', 'phone', 'email', 'accountName'])
       },
       {
         title: '🏢 企业与资产',
-        items: [
-          { label: '企业名称', cmd: 'company' },
-          { label: '信用代码', cmd: 'creditCode' },
-          { label: '职务头衔', cmd: 'title' },
-          { label: '车牌号', cmd: 'licensePlate' },
-          { label: '银行卡', cmd: 'bankCard' },
-          { label: '金额数值', cmd: 'amount' }
-        ]
+        items: toSpotlightItems(['company', 'creditCode', 'title', 'licensePlate', 'bankCard', 'amount'])
       },
       {
         title: '🌐 网络与位置',
-        items: [
-          { label: '详细地址', cmd: 'address' },
-          { label: '邮政编码', cmd: 'zipCode' },
-          { label: 'IP地址', cmd: 'ipv4' },
-          { label: 'MAC地址', cmd: 'mac' },
-          { label: '随机链接', cmd: 'url' },
-          { label: '强密码', cmd: 'password' }
-        ]
+        items: toSpotlightItems(['address', 'zipCode', 'ipv4', 'mac', 'url', 'password'])
       },
       {
         title: '📝 日期与文本',
-        items: [
-          { label: '日期', cmd: 'date' },
-          { label: '时间', cmd: 'time' },
-          { label: '随机数字', cmd: 'number' },
-          { label: '颜色值', cmd: 'color' },
-          { label: '长文本段落', cmd: 'text' }
-        ]
+        items: toSpotlightItems(['date', 'time', 'number', 'color', 'text'])
       }
     ];
 
     // --- 智能化匹配逻辑 ---
-    if (spotlightTargetElement) {
+    if (spotlightTargetElement && spotlightTargetElement.isConnected) {
       const vueInstance = getVueInstance(spotlightTargetElement);
       const labelText = getLabelForInput(spotlightTargetElement, vueInstance);
       const prediction = predictMockType(labelText);
@@ -810,36 +957,40 @@
     container.addEventListener('click', (e) => {
       if (e.target === container) closeSpotlight();
     });
+  }
 
-    // 监听 ESC 关闭
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && container.style.display === 'flex') {
-        closeSpotlight();
-      }
-    });
+  function isTopFrame() {
+    try {
+      return window.top === window.self;
+    } catch (e) {
+      return false;
+    }
   }
 
   function toggleSpotlight() {
+    // 悬浮层只在顶层页面展示，避免 iframe 中重复出现遮罩
+    if (!isTopFrame()) return;
+
     let container = document.getElementById('mock-ext-spotlight');
     if (container && container.style.display !== 'none') {
       closeSpotlight();
       return;
     }
-    
+
     if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
       spotlightTargetElement = document.activeElement;
     }
-    
-    // 强制每次重建DOM以实现智能推荐
+
+    // 每次打开重建 DOM，保证智能推荐跟随当前焦点
     createSpotlightUI();
     container = document.getElementById('mock-ext-spotlight');
-    container.style.display = 'flex';
+    if (container) container.style.display = 'flex';
   }
 
   function closeSpotlight() {
     const container = document.getElementById('mock-ext-spotlight');
     if (container) container.style.display = 'none';
-    if (spotlightTargetElement && typeof spotlightTargetElement.focus === 'function') {
+    if (spotlightTargetElement && spotlightTargetElement.isConnected && typeof spotlightTargetElement.focus === 'function') {
       spotlightTargetElement.focus();
     }
   }
@@ -847,7 +998,7 @@
   function executeSpotlightCommand(cmd) {
     if (!cmd) return;
     if (!spotlightTargetElement || (spotlightTargetElement.tagName !== 'INPUT' && spotlightTargetElement.tagName !== 'TEXTAREA')) {
-      alert("Auto Mock: 请先将光标点击聚焦到需要插入的输入框内，再唤出控制台！");
+      showToast('请先将光标聚焦到需要填入的输入框，再唤出控制台');
       return;
     }
     applyDirectCommandToInput(spotlightTargetElement, cmd);
@@ -855,18 +1006,7 @@
 
   function fillElement(inputEl, mockValue) {
     // 寻找 Vue 实例进行绑定更新
-    let vueInstance = null;
-    const advancedWrapper = inputEl.closest('.el-select, .el-date-editor, .el-cascader, .el-radio-group, .el-switch');
-    if (advancedWrapper && advancedWrapper.__vue__) {
-      vueInstance = advancedWrapper.__vue__;
-    } else {
-      const inputWrapper = inputEl.closest('.el-input, .el-textarea');
-      if (inputWrapper && inputWrapper.__vue__) {
-        vueInstance = inputWrapper.__vue__;
-      } else {
-        vueInstance = inputEl.__vue__;
-      }
-    }
+    const vueInstance = getVueInstance(inputEl);
 
     if (vueInstance) {
       vueInstance.$emit('input', mockValue);
@@ -880,120 +1020,276 @@
   }
 
   // ==========================================
+  // 4. 批量填充辅助：提示、可见性、快照与撤销
+  // ==========================================
+  let toastTimer = null;
+  let lastFillSnapshot = null;
+  let batchFillRunning = false;
+  const NON_TEXT_INPUT_TYPES = ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'];
+
+  function showToast(message, duration) {
+    if (!document.body) return;
+    let toast = document.getElementById('mock-ext-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'mock-ext-toast';
+      toast.style.cssText = 'position:fixed;left:50%;bottom:32px;transform:translateX(-50%);max-width:70vw;padding:10px 16px;background:rgba(48,49,51,0.94);color:#fff;font-size:13px;line-height:1.4;border-radius:6px;z-index:1000000;box-shadow:0 6px 18px rgba(0,0,0,0.2);pointer-events:none;transition:opacity .2s;';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.style.opacity = '1';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.style.opacity = '0';
+    }, duration || 2000);
+  }
+
+  function isTextLikeInput(el) {
+    if (!el) return false;
+    if (el.tagName === 'TEXTAREA') return true;
+    if (el.tagName !== 'INPUT') return false;
+    const type = String(el.type || 'text').toLowerCase();
+    return NON_TEXT_INPUT_TYPES.indexOf(type) === -1;
+  }
+
+  function isElementVisible(el) {
+    if (!el || !el.isConnected || el.type === 'hidden') return false;
+    const style = window.getComputedStyle(el);
+    if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 || rect.height > 0;
+  }
+
+  function collectBatchInputs() {
+    const selector = '.el-input__inner, .el-textarea__inner, input, textarea';
+    const seen = new Set();
+    const result = [];
+    document.querySelectorAll(selector).forEach(el => {
+      if (seen.has(el)) return;
+      seen.add(el);
+      result.push(el);
+    });
+    return result;
+  }
+
+  function readFieldSnapshotValue(inputEl, vueInstance) {
+    if (vueInstance && Object.prototype.hasOwnProperty.call(vueInstance, 'value')) {
+      return vueInstance.value;
+    }
+    return inputEl.value;
+  }
+
+  function restoreSnapshotEntry(entry) {
+    const { inputEl, vueInstance, value } = entry;
+    if (vueInstance && (!vueInstance.$el || vueInstance.$el.isConnected !== false)) {
+      vueInstance.$emit('input', value);
+      vueInstance.$emit('change', value);
+      return;
+    }
+    inputEl.value = value == null ? '' : value;
+    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function undoLastFill() {
+    if (!lastFillSnapshot || lastFillSnapshot.length === 0) {
+      showToast('没有可撤销的填充记录');
+      return false;
+    }
+    lastFillSnapshot.forEach(restoreSnapshotEntry);
+    lastFillSnapshot = null;
+    showToast('已撤销上次填充');
+    return true;
+  }
+
+  function waitForComponentOptions(context, action, retries, delay) {
+    const maxRetries = typeof retries === 'number' ? retries : 4;
+    const retryDelay = typeof delay === 'number' ? delay : 250;
+
+    return new Promise((resolve) => {
+      const attempt = (remaining) => {
+        const rootEl = context.vueInstance && context.vueInstance.$el;
+        if (!rootEl || rootEl.isConnected === false) return resolve(false);
+        if (action()) return resolve(true);
+        if (remaining <= 0) return resolve(false);
+        setTimeout(() => attempt(remaining - 1), retryDelay);
+      };
+      attempt(maxRetries);
+    });
+  }
+
+  // ==========================================
   // 5. 消息监听网关
   // ==========================================
+  function normalizeShortcutValue(value, fallback) {
+    const text = String(value == null ? '' : value).trim().toLowerCase();
+    if (/^f([1-9]|1[0-2])$/.test(text)) return text;
+    if (text.length === 1 && !/\s/.test(text)) return text;
+    return fallback;
+  }
+
+  function normalizeIncomingCustomDicts(value) {
+    if (!Array.isArray(value)) return null;
+    return value
+      .filter(dict => dict && typeof dict === 'object' && typeof dict.regex === 'string')
+      .slice(0, 50)
+      .map(dict => ({
+        label: String(dict.label || '自定义值').slice(0, 50),
+        regex: dict.regex.slice(0, 200),
+        values: Array.isArray(dict.values) ? dict.values.slice(0, 100).map(item => String(item)) : []
+      }));
+  }
+
+  function applyIncomingConfig(incomingConfig) {
+    if (!incomingConfig || typeof incomingConfig !== 'object') return;
+
+    const ignoreKeywords = incomingConfig.IGNORE_KEYWORDS !== undefined ? incomingConfig.IGNORE_KEYWORDS : incomingConfig.ignoreKeywords;
+    if (Array.isArray(ignoreKeywords)) {
+      CONFIG.IGNORE_KEYWORDS = ignoreKeywords.map(item => String(item)).filter(Boolean).slice(0, 100);
+    }
+
+    CONFIG.SHORTCUT_SPOTLIGHT = normalizeShortcutValue(incomingConfig.SHORTCUT_SPOTLIGHT || incomingConfig.shortcutSpotlight, CONFIG.SHORTCUT_SPOTLIGHT);
+    CONFIG.SHORTCUT_FILL_ALL = normalizeShortcutValue(incomingConfig.SHORTCUT_FILL_ALL || incomingConfig.shortcutFill, CONFIG.SHORTCUT_FILL_ALL);
+    CONFIG.SHORTCUT_AI_TRIGGER = normalizeShortcutValue(incomingConfig.SHORTCUT_AI_TRIGGER || incomingConfig.shortcutAiTrigger, CONFIG.SHORTCUT_AI_TRIGGER);
+
+    if (typeof incomingConfig.AI_MANUAL_TRIGGER_MODE === 'boolean') {
+      CONFIG.AI_MANUAL_TRIGGER_MODE = incomingConfig.AI_MANUAL_TRIGGER_MODE;
+    } else if (typeof incomingConfig.aiManualTriggerMode === 'boolean') {
+      CONFIG.AI_MANUAL_TRIGGER_MODE = incomingConfig.aiManualTriggerMode;
+    }
+    if (typeof incomingConfig.AI_ENABLED === 'boolean') {
+      CONFIG.AI_ENABLED = incomingConfig.AI_ENABLED;
+    } else if (typeof incomingConfig.aiEnabled === 'boolean') {
+      CONFIG.AI_ENABLED = incomingConfig.aiEnabled;
+    }
+    if (typeof incomingConfig.AI_ENABLE_CLASSIFICATION === 'boolean') {
+      CONFIG.AI_ENABLE_CLASSIFICATION = incomingConfig.AI_ENABLE_CLASSIFICATION;
+    } else if (typeof incomingConfig.aiEnableClassification === 'boolean') {
+      CONFIG.AI_ENABLE_CLASSIFICATION = incomingConfig.aiEnableClassification;
+    }
+
+    const customDicts = normalizeIncomingCustomDicts(
+      incomingConfig.CUSTOM_DICTS !== undefined ? incomingConfig.CUSTOM_DICTS : incomingConfig.customDicts
+    );
+    if (customDicts) CONFIG.CUSTOM_DICTS = customDicts;
+
+    console.log('Auto Mock Configuration updated from extension options.');
+  }
+
   window.addEventListener("message", (event) => {
-    if (event.source !== window) return;
-    if (event.data && event.data.type === "AUTO_MOCK_FILL") {
-      fillElementUiForms();
-    } else if (event.data && event.data.type === "TOGGLE_SPOTLIGHT") {
+    if (event.source !== window || !event.data) return;
+    const messageType = event.data.type;
+    if (messageType === "AUTO_MOCK_FILL") {
+      fillElementUiForms().catch(err => console.error('[AutoMock] 批量填充失败:', err));
+    } else if (messageType === "TOGGLE_SPOTLIGHT") {
       toggleSpotlight();
-    } else if (event.data && event.data.type === "INIT_MOCK_CONFIG") {
-      if (event.data.config) {
-        const incomingConfig = event.data.config;
-        CONFIG.IGNORE_KEYWORDS = incomingConfig.IGNORE_KEYWORDS || incomingConfig.ignoreKeywords || CONFIG.IGNORE_KEYWORDS;
-        CONFIG.SHORTCUT_SPOTLIGHT = incomingConfig.SHORTCUT_SPOTLIGHT || incomingConfig.shortcutSpotlight || CONFIG.SHORTCUT_SPOTLIGHT;
-        CONFIG.SHORTCUT_FILL_ALL = incomingConfig.SHORTCUT_FILL_ALL || incomingConfig.shortcutFill || CONFIG.SHORTCUT_FILL_ALL;
-        CONFIG.SHORTCUT_AI_TRIGGER = incomingConfig.SHORTCUT_AI_TRIGGER || incomingConfig.shortcutAiTrigger || CONFIG.SHORTCUT_AI_TRIGGER;
-        if (typeof incomingConfig.AI_MANUAL_TRIGGER_MODE === 'boolean') {
-          CONFIG.AI_MANUAL_TRIGGER_MODE = incomingConfig.AI_MANUAL_TRIGGER_MODE;
-        } else if (typeof incomingConfig.aiManualTriggerMode === 'boolean') {
-          CONFIG.AI_MANUAL_TRIGGER_MODE = incomingConfig.aiManualTriggerMode;
-        }
-        if (typeof incomingConfig.DEEPSEEK_API_URL === 'string') {
-          CONFIG.DEEPSEEK_API_URL = incomingConfig.DEEPSEEK_API_URL;
-        } else if (typeof incomingConfig.deepseekApiUrl === 'string') {
-          CONFIG.DEEPSEEK_API_URL = incomingConfig.deepseekApiUrl;
-        }
-        if (typeof incomingConfig.DEEPSEEK_API_MODEL === 'string') {
-          CONFIG.DEEPSEEK_API_MODEL = incomingConfig.DEEPSEEK_API_MODEL;
-        } else if (typeof incomingConfig.deepseekApiModel === 'string') {
-          CONFIG.DEEPSEEK_API_MODEL = incomingConfig.deepseekApiModel;
-        }
-        if (typeof incomingConfig.DEEPSEEK_API_KEY === 'string') {
-          CONFIG.DEEPSEEK_API_KEY = incomingConfig.DEEPSEEK_API_KEY;
-        } else if (typeof incomingConfig.deepseekApiKey === 'string') {
-          CONFIG.DEEPSEEK_API_KEY = incomingConfig.deepseekApiKey;
-        }
-        console.log("Auto Mock Configuration updated from extension options.");
-      }
+    } else if (messageType === "AUTO_MOCK_UNDO") {
+      undoLastFill();
+    } else if (messageType === "INIT_MOCK_CONFIG") {
+      applyIncomingConfig(event.data.config);
     }
   }, false);
 
   async function fillElementUiForms() {
-    console.log("Starting Auto Mock Fill...");
-    const inputs = Array.from(document.querySelectorAll('.el-input__inner, .el-textarea__inner'));
+    if (batchFillRunning) return { filled: 0, skipped: 0 };
+    batchFillRunning = true;
+    const snapshot = [];
+    const filledHookInstances = new Set();
     let fillCount = 0;
     let skipCount = 0;
 
-    for (let i = 0; i < inputs.length; i++) {
-      const input = inputs[i];
-      if (i > 0 && i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+    try {
+      const inputs = collectBatchInputs();
+      for (let i = 0; i < inputs.length; i++) {
+        const input = inputs[i];
+        if (i > 0 && i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
 
-      const vueInstance = getVueInstance(input);
-      const componentName = vueInstance && vueInstance.$options ? vueInstance.$options.name : '';
+        // 非文本输入、隐藏元素不属于可填目标，不计入跳过统计
+        if (!isTextLikeInput(input) || !isElementVisible(input)) continue;
 
-      const isNativeDisabled = input.disabled || input.hasAttribute('disabled') || input.closest('.is-disabled');
-      const isVueDisabled = vueInstance && (vueInstance.disabled || vueInstance.inputDisabled || vueInstance.selectDisabled);
-      if (isNativeDisabled || isVueDisabled) continue;
+        const context = getFieldContext(input);
+        if (!context) {
+          skipCount++;
+          continue;
+        }
 
-      if (input.readOnly || input.hasAttribute('readonly')) {
-        if (!CustomHooks[componentName]) continue;
-      }
+        // 复合组件（日期范围、级联等）内部可能有多个 input，只处理一次
+        if (context.hookAction && context.vueInstance) {
+          if (filledHookInstances.has(context.vueInstance)) {
+            skipCount++;
+            continue;
+          }
+          filledHookInstances.add(context.vueInstance);
+        }
 
-      const labelText = getLabelForInput(input, vueInstance);
+        const entry = {
+          inputEl: input,
+          vueInstance: context.vueInstance,
+          value: readFieldSnapshotValue(input, context.vueInstance)
+        };
 
-      let vModelExpr = '';
-      if (vueInstance && vueInstance.$vnode && vueInstance.$vnode.data && vueInstance.$vnode.data.model) {
-        vModelExpr = vueInstance.$vnode.data.model.expression || '';
-      }
-      
-      const isIgnored = CONFIG.IGNORE_KEYWORDS.some(keyword => {
-        const kw = keyword.toLowerCase();
-        return labelText.toLowerCase().includes(kw) || (vModelExpr && vModelExpr.toLowerCase().includes(kw));
-      });
-      if (isIgnored) {
-        console.log(`Auto Mock: 跳过字段 "${labelText}" (触发黑名单)`);
-        skipCount++;
-        continue;
-      }
-      
-      if (vueInstance) {
-        if (CustomHooks[componentName]) {
-          const success = CustomHooks[componentName](vueInstance, labelText);
-          if (success) fillCount++;
+        let filled = false;
+        if (context.hookAction) {
+          filled = await waitForComponentOptions(context, context.hookAction);
         } else {
-          const mockValue = resolveMockType(labelText);
-          vueInstance.$emit('input', mockValue);
-          vueInstance.$emit('change', mockValue);
-          fillCount++;
+          const prediction = context.fallbackPrediction || predictMockType(context.labelText);
+          const mockValue = prediction && prediction.cmd
+            ? buildMockValueFromCommand(prediction.cmd)
+            : MockFactory.randomString();
+          fillElement(input, mockValue);
+          filled = true;
         }
-      } else {
-        if (!input.readOnly && !input.disabled) {
-          input.value = resolveMockType(labelText);
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
+
+        if (filled) {
+          snapshot.push(entry);
           fillCount++;
+        } else {
+          skipCount++;
         }
       }
+    } finally {
+      batchFillRunning = false;
     }
-    console.log(`Auto Mock Fill completed. Filled: ${fillCount}, Skipped: ${skipCount}`);
+
+    lastFillSnapshot = snapshot.length > 0 ? snapshot : null;
+    const summary = `Auto Mock 填充完成：成功 ${fillCount} 项，跳过 ${skipCount} 项`;
+    console.log(summary);
+    if (fillCount > 0) {
+      showToast(`${summary}，可在扩展面板撤销`);
+    }
+    return { filled: fillCount, skipped: skipCount };
   }
 
   // ==========================================
   // 6. 全局原生快捷键挂载 (摆脱浏览器底层限制)
   // ==========================================
   document.addEventListener('keydown', (e) => {
-    if (e.altKey && e.key.toLowerCase() === CONFIG.SHORTCUT_SPOTLIGHT.toLowerCase()) {
+    if (!e.isTrusted) return;
+
+    if (e.key === 'Escape') {
+      const spotlight = document.getElementById('mock-ext-spotlight');
+      if (spotlight && spotlight.style.display === 'flex') {
+        e.preventDefault();
+        closeSpotlight();
+      }
+      return;
+    }
+
+    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    const key = String(e.key || '').toLowerCase();
+
+    if (key === String(CONFIG.SHORTCUT_SPOTLIGHT || 'x').toLowerCase()) {
       e.preventDefault();
       toggleSpotlight();
-    } else if (e.altKey && e.key.toLowerCase() === CONFIG.SHORTCUT_FILL_ALL.toLowerCase()) {
+    } else if (key === String(CONFIG.SHORTCUT_FILL_ALL || 'z').toLowerCase()) {
       e.preventDefault();
-      fillElementUiForms();
-    } else if (e.altKey && e.key.toLowerCase() === CONFIG.SHORTCUT_AI_TRIGGER.toLowerCase()) {
+      fillElementUiForms().catch(err => console.error('[AutoMock] 批量填充失败:', err));
+    } else if (key === String(CONFIG.SHORTCUT_AI_TRIGGER || 's').toLowerCase()) {
       e.preventDefault();
       triggerFocusedFieldAi();
     }
   });
 
+  // 通知 content.js 注入完成，可立即下发配置
+  window.postMessage({ type: 'AUTO_MOCK_READY' }, '*');
 })();

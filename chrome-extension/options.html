@@ -102,6 +102,26 @@
       border-color: #409eff;
       box-shadow: 0 0 0 2px rgba(64,158,255,0.2);
     }
+    .button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    button.secondary {
+      background-color: #f4f4f5;
+      color: #606266;
+      border: 1px solid #dcdfe6;
+    }
+    button.secondary:hover {
+      background-color: #e9e9eb;
+    }
+    button.secondary.danger {
+      color: #f56c6c;
+      border-color: #fbc4c4;
+    }
+    button.secondary.danger:hover {
+      background-color: #fef0f0;
+    }
     button {
       padding: 10px 20px;
       background-color: #409EFF;
@@ -138,8 +158,8 @@
     <h2><img src="logo.png" alt="logo"/> Auto Mock 全局设置</h2>
     
     <div class="form-group">
-      <label>🎯 全局快捷键绑定 (突破浏览器限制)</label>
-      <div class="help-text">点击下方输入框，并在键盘上按下您想要的按键（触发时需结合 <strong>Alt</strong> 键）。您可以随意绑定为如 <code>X</code> 或 <code>F2</code>。</div>
+      <label>🎯 页面内快捷键（Alt + 单键）</label>
+      <div class="help-text">点击下方输入框后按下目标按键，支持字母、数字、符号或 <code>F1</code>–<code>F12</code>。快捷键只在目标页面获得焦点时生效，不是浏览器级全局快捷键。</div>
       <div class="input-row">
         <span style="width: 140px; font-size: 14px; color: #606266;">唤出悬浮窗 (Alt +)</span>
         <input type="text" id="shortcutSpotlight" class="shortcut-input" readonly title="点击并按下新按键" />
@@ -149,7 +169,7 @@
         <input type="text" id="shortcutFill" class="shortcut-input" readonly title="点击并按下新按键" />
       </div>
       <div class="input-row">
-        <span style="width: 140px; font-size: 14px; color: #606266;">AI 推荐类目 (Alt +)</span>
+        <span style="width: 140px; font-size: 14px; color: #606266;">AI 填充字段 (Alt +)</span>
         <input type="text" id="shortcutAiTrigger" class="shortcut-input" readonly title="点击并按下新按键" />
       </div>
     </div>
@@ -174,12 +194,12 @@
 
     <div class="form-group">
       <label>🤖 大模型智能交互 (兼容 OpenAI 格式)</label>
-      <div class="help-text">只要是兼容 OpenAI 格式的 API 都能接入。默认填入 DeepSeek 配置。清空 Key 即可关闭此功能。</div>
+      <div class="help-text">兼容 OpenAI 格式的 API 都可接入，默认填入 DeepSeek 配置。清空 Key 即可关闭此功能；Key 仅保存在扩展存储中，不会注入页面。</div>
       <div class="input-row" style="align-items: flex-start;">
         <span style="width: 100px; font-size: 14px; color: #606266;">触发模式:</span>
         <label style="display: flex; align-items: center; gap: 8px; font-weight: 400; margin-bottom: 0;">
           <input type="checkbox" id="aiManualTriggerMode" checked />
-          保留 AI 推荐快捷键，选中字段后按快捷键刷新当前字段推荐类目
+          手动模式：仅在按 Alt+S 时请求 AI；关闭后聚焦字段会自动请求
         </label>
       </div>
       <div class="input-row" style="align-items: flex-start;">
@@ -187,13 +207,6 @@
         <label style="display: flex; align-items: center; gap: 8px; font-weight: 400; margin-bottom: 0;">
           <input type="checkbox" id="aiEnableClassification" checked />
           启用 AI 类目推荐；关闭后仅使用本地兜底推荐，不请求 AI，不消耗 Token
-        </label>
-      </div>
-      <div class="input-row" style="align-items: flex-start;">
-        <span style="width: 100px; font-size: 14px; color: #606266;">AI 预加载:</span>
-        <label style="display: flex; align-items: center; gap: 8px; font-weight: 400; margin-bottom: 0;">
-          <input type="checkbox" id="aiEnablePreload" checked />
-          启用 AI 预加载分类；关闭后仅在打开弹窗时按需请求 AI
         </label>
       </div>
       <div class="input-row">
@@ -207,6 +220,17 @@
       <div class="input-row">
         <span style="width: 100px; font-size: 14px; color: #606266;">API Key:</span>
         <input type="password" id="deepseekApiKey" placeholder="sk-..." />
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>📦 配置迁移</label>
+      <div class="help-text">导出当前配置用于备份或分享；导入后仍需点击「保存并立刻生效」。</div>
+      <div class="button-row">
+        <button id="exportBtn" class="secondary" type="button">导出配置</button>
+        <button id="importBtn" class="secondary" type="button">导入配置</button>
+        <button id="resetBtn" class="secondary danger" type="button">恢复默认</button>
+        <input type="file" id="importFile" accept="application/json" style="display: none;" />
       </div>
     </div>
 
