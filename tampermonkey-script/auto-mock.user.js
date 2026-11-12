@@ -46,8 +46,6 @@
     DEEPSEEK_API_KEY: ''
   };
 
-  let CONFIG = (typeof GM_getValue !== 'undefined') ? GM_getValue('auto_mock_config', DEFAULT_CONFIG) : DEFAULT_CONFIG;
-  CONFIG = { ...DEFAULT_CONFIG, ...(CONFIG || {}) };
   let lastFillOperation = null;
   let batchFillRunning = false;
 
@@ -63,9 +61,138 @@
   ]);
 
   // ==========================================
+  // 配置归一化：存储里的配置可能来自旧版本或被手工改坏，
+  // 列表字段不是数组、快捷键不是字符串都会让热路径（keydown、字段识别）直接抛错
+  // ==========================================
+  const SHORTCUT_CONFIG_KEYS = ['SHORTCUT_SPOTLIGHT', 'SHORTCUT_FILL_ALL', 'SHORTCUT_AI_TRIGGER'];
+  const BOOLEAN_CONFIG_KEYS = ['AI_MANUAL_TRIGGER_MODE', 'AI_ENABLE_CLASSIFICATION', 'AI_ENABLE_PRELOAD', 'VALIDATE_AFTER_FILL', 'FILL_ONLY_EMPTY'];
+  const NUMBER_CONFIG_RANGES = {
+    REMOTE_OPTION_RETRY_COUNT: [0, 10],
+    REMOTE_OPTION_RETRY_DELAY_MS: [50, 2000],
+    DYNAMIC_FILL_WINDOW_MS: [1000, 60000],
+    DYNAMIC_FILL_MAX_DIALOG_STEPS: [1, 10]
+  };
+  const FILL_VALIDATION_MODES = ['normal', 'boundary', 'invalid'];
+
+  // 快捷键只接受单个字符（按码点计，不含空白），统一小写；不合法时落回 fallback
+  function normalizeShortcutKey(value, fallback) {
+    const key = String(value == null ? '' : value).trim().toLowerCase();
+    return key && Array.from(key).length === 1 ? key : fallback;
+  }
+
+  // 关键词列表同时接受数组与分隔文本；中英文逗号、顿号、分号、换行都算分隔符，去重并限量
+  function splitKeywordList(value) {
+    const source = Array.isArray(value) ? value : String(value == null ? '' : value).split(/[,，、;；\r\n]+/);
+    const seen = new Set();
+    const keywords = [];
+    source.forEach(item => {
+      const keyword = String(item == null ? '' : item).trim().slice(0, 50);
+      if (!keyword || seen.has(keyword)) return;
+      seen.add(keyword);
+      keywords.push(keyword);
+    });
+    return keywords.slice(0, 200);
+  }
+
+  // 自定义字典会在每个字段识别时执行 regex：结构不完整、正则无法编译或有回溯风险的条目一律丢弃，
+  // 否则 predictMockTypes 会反复抛错，或在页面标签上卡死主线程
+  function normalizeCustomDicts(value) {
+    if (!Array.isArray(value)) return [];
+    const dicts = value.filter(dict => {
+      if (!dict || typeof dict !== 'object') return false;
+      if (typeof dict.regex !== 'string' || !dict.regex.trim() || isUnsafeUserRegex(dict.regex)) return false;
+      if (!Array.isArray(dict.values) || dict.values.length === 0) return false;
+      try {
+        new RegExp(dict.regex, 'i');
+        return true;
+      } catch (error) {
+        return false;
+      }
+    });
+    if (dicts.length !== value.length) {
+      console.warn(`[AutoMock] 已忽略 ${value.length - dicts.length} 个无效的自定义字典条目`);
+    }
+    return dicts.slice(0, 50).map(dict => ({ ...dict, label: typeof dict.label === 'string' ? dict.label.trim() : '' }));
+  }
+
+  function normalizeConfig(raw) {
+    const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const next = { ...DEFAULT_CONFIG, ...source };
+
+    SHORTCUT_CONFIG_KEYS.forEach(key => {
+      next[key] = normalizeShortcutKey(source[key], DEFAULT_CONFIG[key]);
+    });
+    if (new Set(SHORTCUT_CONFIG_KEYS.map(key => next[key])).size !== SHORTCUT_CONFIG_KEYS.length) {
+      console.warn('[AutoMock] 快捷键配置存在重复，已恢复默认快捷键');
+      SHORTCUT_CONFIG_KEYS.forEach(key => { next[key] = DEFAULT_CONFIG[key]; });
+    }
+
+    BOOLEAN_CONFIG_KEYS.forEach(key => {
+      next[key] = typeof source[key] === 'boolean' ? source[key] : DEFAULT_CONFIG[key];
+    });
+    Object.keys(NUMBER_CONFIG_RANGES).forEach(key => {
+      const [minimum, maximum] = NUMBER_CONFIG_RANGES[key];
+      next[key] = getBoundedConfigNumber(source[key], DEFAULT_CONFIG[key], minimum, maximum);
+    });
+
+    const keywords = splitKeywordList(source.IGNORE_KEYWORDS);
+    next.IGNORE_KEYWORDS = keywords.length ? keywords : DEFAULT_CONFIG.IGNORE_KEYWORDS.slice();
+    next.CUSTOM_DICTS = normalizeCustomDicts(source.CUSTOM_DICTS);
+    // 站点规则的逐条归一化依赖后面才初始化的缓存，这里只保证是数组，细节由 normalizeSiteRules 兜底
+    next.SITE_RULES = Array.isArray(source.SITE_RULES) ? source.SITE_RULES : [];
+
+    // 用 hasOwnProperty 判断：'constructor'、'__proto__' 这类键在普通对象上也会取到值
+    next.DATA_PROFILE = Object.prototype.hasOwnProperty.call(DATA_PROFILES, source.DATA_PROFILE) ? source.DATA_PROFILE : DEFAULT_CONFIG.DATA_PROFILE;
+    next.RANDOM_SEED = String(source.RANDOM_SEED == null ? '' : source.RANDOM_SEED).trim();
+    next.NUMBER_FILL_STRATEGY = source.NUMBER_FILL_STRATEGY === 'boundary' ? 'boundary' : 'normal';
+    next.FILL_VALIDATION_MODE = FILL_VALIDATION_MODES.includes(source.FILL_VALIDATION_MODE) ? source.FILL_VALIDATION_MODE : 'normal';
+
+    next.DEEPSEEK_API_URL = String(source.DEEPSEEK_API_URL || '').trim() || DEFAULT_CONFIG.DEEPSEEK_API_URL;
+    next.DEEPSEEK_API_MODEL = String(source.DEEPSEEK_API_MODEL || '').trim() || DEFAULT_CONFIG.DEEPSEEK_API_MODEL;
+    next.DEEPSEEK_API_KEY = typeof source.DEEPSEEK_API_KEY === 'string' ? source.DEEPSEEK_API_KEY.trim() : '';
+    return next;
+  }
+
+  let CONFIG = normalizeConfig(typeof GM_getValue !== 'undefined' ? GM_getValue('auto_mock_config', DEFAULT_CONFIG) : DEFAULT_CONFIG);
+
+  // ==========================================
   // 1. 高阶内置 Mock 数据工厂 (Mock Engine)
   // ==========================================
-  const ID_CARD_REGIONS = ['110101', '310101', '440101', '350203', '440304'];
+  // 业务数据集：城市、区县、街道、邮编、行政区划集中维护，
+  // 同一会话内的地址/公司/门店/证件号共享同一城市，避免拼出「北京市朝阳区深南大道」这类错配
+  const BUSINESS_CITIES = [
+    { name: '厦门', district: '思明区', streets: ['软件园二期', '高林中路', '环岛东路'], zip: '361000', adminCode: '350203', plate: '闽D' },
+    { name: '北京', district: '朝阳区', streets: ['建国路', '望京东路', '酒仙桥路'], zip: '100020', adminCode: '110105', plate: '京A' },
+    { name: '上海', district: '浦东新区', streets: ['世纪大道', '张江路', '锦绣路'], zip: '200135', adminCode: '310115', plate: '沪A' },
+    { name: '广州', district: '天河区', streets: ['天河路', '珠江新城华夏路', '科韵路'], zip: '510630', adminCode: '440106', plate: '粤A' },
+    { name: '深圳', district: '南山区', streets: ['深南大道', '科技园南路', '后海大道'], zip: '518052', adminCode: '440305', plate: '粤B' },
+    { name: '杭州', district: '余杭区', streets: ['文一西路', '五常大道', '良睦路'], zip: '311100', adminCode: '330110', plate: '浙A' },
+    { name: '成都', district: '武侯区', streets: ['天府大道', '科华南路', '武侯祠大街'], zip: '610041', adminCode: '510107', plate: '川A' },
+    { name: '武汉', district: '洪山区', streets: ['光谷大道', '珞喻路', '关山大道'], zip: '430070', adminCode: '420111', plate: '鄂A' }
+  ];
+  // 渠道业务里真实存在的字号，用于拼出可信的账号/邮箱前缀
+  const BUSINESS_BRANDS = ['臻选', '恒美', '筑家', '尚品', '嘉禾', '铂锐', '悦居', '和成', '明远', '启程'];
+  // 个人邮箱域名池：业务账号体系（jomoo 域名）留给企业资料，普通表单的邮箱来自姓名拼音
+  const EMAIL_DOMAINS = ['163.com', 'qq.com', '126.com', 'outlook.com', 'gmail.com'];
+  // 姓名池带拼音：姓名、英文名、邮箱前缀必须来自同一个人，才能互相印证
+  const PERSON_SURNAMES = parseNamePairs('王|wang,李|li,张|zhang,刘|liu,陈|chen,杨|yang,黄|huang,赵|zhao,吴|wu,周|zhou,徐|xu,孙|sun,马|ma,朱|zhu,胡|hu,郭|guo,何|he,高|gao,林|lin,罗|luo,郑|zheng,梁|liang,谢|xie,宋|song,唐|tang,许|xu,韩|han,冯|feng,邓|deng,曹|cao,彭|peng,曾|zeng,肖|xiao,田|tian,董|dong,袁|yuan,潘|pan,于|yu,蒋|jiang,蔡|cai,余|yu,杜|du,叶|ye,程|cheng,苏|su,魏|wei,吕|lv,丁|ding,任|ren,沈|shen,姚|yao,卢|lu,姜|jiang,崔|cui,钟|zhong,谭|tan,陆|lu,汪|wang,范|fan,金|jin,石|shi,廖|liao,贾|jia,夏|xia,韦|wei,付|fu,方|fang,白|bai,邹|zou,孟|meng,熊|xiong,秦|qin,邱|qiu,江|jiang,尹|yin,薛|xue,闫|yan,段|duan,雷|lei,侯|hou,龙|long,史|shi,陶|tao,黎|li,贺|he,顾|gu,毛|mao,郝|hao,龚|gong,邵|shao,万|wan,钱|qian,严|yan,覃|qin,武|wu,戴|dai,莫|mo,孔|kong,向|xiang,汤|tang');
+  const GIVEN_NAMES_MALE = parseNamePairs('伟|wei,强|qiang,磊|lei,军|jun,洋|yang,勇|yong,杰|jie,涛|tao,明|ming,超|chao,刚|gang,毅|yi,俊|jun,峰|feng,平|ping,东|dong,文|wen,辉|hui,国|guo,胜|sheng,健|jian,志|zhi,海|hai,山|shan,波|bo,宁|ning,福|fu,生|sheng,龙|long,元|yuan,学|xue,祥|xiang,才|cai,发|fa,武|wu,新|xin,利|li,清|qing,飞|fei,彬|bin,富|fu,顺|shun,信|xin,子|zi,昌|chang,成|cheng,康|kang,星|xing,光|guang,天|tian,达|da,安|an,岩|yan,中|zhong,茂|mao,进|jin,林|lin,坚|jian,和|he,彪|biao,博|bo,诚|cheng,先|xian,敬|jing,振|zhen,壮|zhuang,豪|hao,心|xin,邦|bang,承|cheng,乐|le,绍|shao,松|song,善|shan,厚|hou,庆|qing,民|min,友|you,裕|yu,河|he,哲|zhe,江|jiang,浩|hao,亮|liang,政|zheng,谦|qian,奇|qi,轮|lun,翰|han,朗|lang,宏|hong,若|ruo,鸣|ming,朋|peng,斌|bin,栋|dong,维|wei,启|qi,伦|lun,翔|xiang,旭|xu,鹏|peng,泽|ze,晨|chen,辰|chen,建|jian,家|jia,致|zhi,树|shu,炎|yan,德|de,时|shi,泰|tai,盛|sheng,雄|xiong,琛|chen,钧|jun,冠|guan,策|ce,腾|teng,楠|nan,榕|rong,风|feng,航|hang,弘|hong');
+  const GIVEN_NAMES_FEMALE = parseNamePairs('秀|xiu,娟|juan,英|ying,华|hua,慧|hui,巧|qiao,美|mei,娜|na,静|jing,淑|shu,惠|hui,珠|zhu,翠|cui,雅|ya,芝|zhi,玉|yu,萍|ping,红|hong,玲|ling,芬|fen,芳|fang,燕|yan,彩|cai,春|chun,菊|ju,兰|lan,凤|feng,洁|jie,梅|mei,琳|lin,素|su,云|yun,莲|lian,真|zhen,雪|xue,爱|ai,妹|mei,霞|xia,香|xiang,月|yue,媛|yuan,艳|yan,瑞|rui,佳|jia,嘉|jia,琼|qiong,珍|zhen,莉|li,桂|gui,叶|ye,璐|lu,娅|ya,琦|qi,晶|jing,妍|yan,茜|qian,秋|qiu,珊|shan,莎|sha,锦|jin,青|qing,倩|qian,婷|ting,婉|wan,娴|xian,瑾|jin,颖|ying,露|lu,瑶|yao,怡|yi,雁|yan,蓓|bei,仪|yi,荷|he,丹|dan,蓉|rong,君|jun,琴|qin,蕊|rui,薇|wei,菁|jing,梦|meng,岚|lan,苑|yuan,婕|jie,馨|xin,韵|yun,艺|yi,卿|qing,澜|lan,纯|chun,悦|yue,冰|bing,爽|shuang,茗|ming,羽|yu,希|xi,欣|xin,柔|rou,竹|zhu,凝|ning,晓|xiao,欢|huan,枫|feng,芸|yun,菲|fei,伊|yi,宜|yi,可|ke,舒|shu,影|ying,丽|li,思|si');
+  // 现实中的姓氏分布极不均匀：王李张刘陈加起来就接近三成，这里给常见姓加权，其余姓保持均匀
+  const COMMON_SURNAME_TIERS = ['王','李','张','刘','陈','杨','黄','赵','吴','周','徐','孙','马','朱','胡','郭','何','高','林','罗'];
+  const PERSON_SURNAME_POOL = (() => {
+    const pool = [];
+    PERSON_SURNAMES.forEach(item => {
+      const tier = COMMON_SURNAME_TIERS.indexOf(item.char);
+      const weight = tier < 0 ? 1 : tier < 10 ? 4 : 2;
+      for (let i = 0; i < weight; i++) pool.push(item);
+    });
+    return pool;
+  })();
+  // 表单使用者以在职人群为主，年龄跨度收窄到这一区间，避免出现 62 岁「渠道总监」
+  const PERSON_AGE_RANGE = [23, 45];
+
+  const BANK_CARD_BINS = ['622202', '621700', '622848', '622588', '621661'];
   const CREDIT_CODE_CHARS = '0123456789ABCDEFGHJKLMNPQRTUWXY';
 
   function randomDigitString(length) {
@@ -74,12 +201,16 @@
     return value;
   }
 
-  function randomBirthDateText() {
-    const start = new Date(1970, 0, 1).getTime();
-    const latest = new Date();
-    latest.setFullYear(latest.getFullYear() - 18);
-    const date = new Date(start + Math.floor(Math.random() * (latest.getTime() - start + 1)));
-    return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
+  function shuffleArray(items) {
+    const list = items.slice();
+    // Fisher-Yates：sort(() => Math.random() - 0.5) 的比较函数不满足传递性，洗牌结果是有偏的
+    for (let i = list.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const temp = list[i];
+      list[i] = list[j];
+      list[j] = temp;
+    }
+    return list;
   }
 
   function appendIdCardCheckDigit(body) {
@@ -113,39 +244,30 @@
   }
 
   const MockFactory = {
-    name: () => {
-      const familyNames = "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳酆鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆萧尹姚邵湛汪祁毛禹狄米贝明臧计伏成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季麻强贾路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯昝管卢莫经房裘缪干解应宗丁宣贲邓郁单杭洪包诸左石崔吉钮龚程嵇邢滑裴陆荣翁荀羊於惠甄曲家封芮羿储靳汲邴糜松井段富巫乌焦巴弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘钭厉戎祖武符刘景詹束龙叶幸司韶郜黎蓟薄印宿白怀蒲邰从鄂索咸籍赖卓蔺屠蒙池乔阴鬱胥能苍双闻莘党翟谭贡劳逄姬申扶堵冉宰郦雍卻璩桑桂濮牛寿通边扈燕冀郏浦尚农温别庄晏柴瞿阎充慕连茹习宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙东欧殳沃利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋沙乜养鞠须丰巢关蒯相查后荆红游竺权逯盖益强贾路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯昝管卢莫经房裘缪干解应宗丁宣贲邓郁单杭洪包诸左石崔吉钮龚程嵇邢滑裴陆荣翁荀羊於惠甄曲家封芮羿储靳汲邴糜松井段富巫乌焦巴弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘钭厉戎祖武符刘景詹束龙叶幸司韶郜黎蓟薄印宿白怀蒲邰从鄂索咸籍赖卓蔺屠蒙池乔阴鬱胥能苍双闻莘党翟谭贡劳逄姬申扶堵冉宰郦雍卻璩桑桂濮牛寿通边扈燕冀郏浦尚农温别庄晏柴瞿阎充慕连茹习宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙东欧殳沃利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋沙乜养鞠须丰巢关蒯相查后荆红游竺权逯盖益桓公万俟司马上官欧阳夏侯诸葛闻人东方赫连皇甫尉迟公羊澹台公冶宗政濮阳淳于单于太叔申屠公孙仲孙轩辕令狐钟离宇文长孙慕容鲜于闾丘司徒司空亓官司寇仉督子车颛孙端木巫马公西漆雕乐正壤驷公良拓跋夹谷宰父谷梁晋楚阎法汝鄢涂钦段干百里东郭南门呼延归海羊舌微生岳帅缑亢况郈有琴梁丘左丘东门西门商牟佘佴伯赏南宫墨哈谯笪年爱阳佟第五言福";
-      const givenNames = "伟刚勇毅俊峰强军平保东文辉力明国胜健世广志义兴良海山仁波宁贵福生龙元全国胜学祥才发武新利清飞彬富顺信子杰涛昌成康星光天达安岩中茂进林有坚和彪博诚先敬震振壮会思群豪心邦承乐绍功松善厚庆磊民友裕河哲江超浩亮政谦亨奇固之轮翰朗伯宏言若鸣朋斌梁栋维启克伦翔旭鹏泽晨辰士以建家致树炎德行时泰盛雄琛钧冠策腾楠榕风航弘秀娟英华慧巧美娜静淑惠珠翠雅芝玉萍红娥玲芬芳燕彩春菊兰凤洁梅琳素云莲真环雪荣爱妹霞香月莺媛艳瑞凡佳嘉琼勤珍贞莉桂娣叶璧璐娅琦晶妍茜秋珊莎锦黛青倩婷姣婉娴瑾颖露瑶怡婵雁蓓纨仪荷丹蓉眉君琴蕊薇菁梦岚苑婕馨瑗琰韵融园艺咏卿聪澜纯毓悦昭冰爽琬茗羽希宁欣飘育滢馥筠柔竹霭凝晓欢霄枫芸菲寒伊亚宜可姬舒影荔枝思丽";
-      const getRandomChar = (str) => str.charAt(Math.floor(Math.random() * str.length));
-      return getRandomChar(familyNames) + getRandomChar(givenNames) + (Math.random() > 0.5 ? getRandomChar(givenNames) : '');
-    },
+    name: (session) => getSessionPerson(session).name,
+
     phone: () => {
-      const prefixes = ['138','139','150','151','152','158','159','188','187','186','185','183','182','130','131','132','155','156','133','153','180','181','189'];
+      const prefixes = ['138','139','150','151','152','158','159','188','187','186','185','183','182','130','131','132','155','156','133','153','180','181','189','166','167','170','171','173','175','176','177','178','191','198','199'];
       return prefixes[Math.floor(Math.random() * prefixes.length)] + Math.floor(Math.random() * 100000000).toString().padStart(8, '0');
     },
-    email: () => {
-      const domains = ['@qq.com', '@163.com', '@gmail.com', '@jomoo.cn', '@test.com'];
-      return Math.random().toString(36).substring(2, 10) + domains[Math.floor(Math.random() * domains.length)];
+    email: (session) => getSessionPerson(session).email,
+    idcard: (session) => {
+      const person = getSessionPerson(session);
+      // 第 17 位奇数为男、偶数为女：和性别字段共用同一个来源，证件与性别不会互相打架
+      const sequence = String(Math.floor(Math.random() * 500) * 2 + (person.gender === '男' ? 1 : 0)).padStart(3, '0');
+      return appendIdCardCheckDigit(person.city.adminCode + person.birthText + sequence);
     },
-    idcard: () => {
-      const region = ID_CARD_REGIONS[Math.floor(Math.random() * ID_CARD_REGIONS.length)];
-      const sequence = String(Math.floor(Math.random() * 999) + 1).padStart(3, '0');
-      return appendIdCardCheckDigit(region + randomBirthDateText() + sequence);
-    },
-    bankCard: () => {
+    bankCard: (session) => {
       const totalLength = 16 + Math.floor(Math.random() * 4);
-      const body = '62' + randomDigitString(totalLength - 3);
+      const bin = pickSessionValue(BANK_CARD_BINS, session);
+      const body = bin + randomDigitString(totalLength - 1 - bin.length);
       return appendLuhnCheckDigit(body);
     },
     title: () => {
-      const titles = ['总经理', '副总经理', '研发总监', '产品经理', '项目经理', '资深开发工程师', '视觉设计师', '财务专员', '人事主管', '销售代表', '渠道总监', '大区经理'];
+      const titles = ['总经理', '副总经理', '渠道总监', '大区经理', '区域经理', '门店店长', '客户经理', '招商经理', '市场专员', '运营主管', '财务专员', '售后工程师'];
       return titles[Math.floor(Math.random() * titles.length)];
     },
-    address: () => {
-      const cities = ['北京市朝阳区', '上海市浦东新区', '福建省厦门市思明区', '广东省深圳市南山区', '浙江省杭州市余杭区'];
-      const streets = ['高林中路', '软件园二期', '深南大道', '世纪大道', '文三路'];
-      return cities[Math.floor(Math.random() * cities.length)] + streets[Math.floor(Math.random() * streets.length)] + Math.floor(Math.random() * 999 + 1) + '号';
-    },
+    address: (session) => buildBusinessAddress(session),
     url: () => "https://www.example.com/" + Math.random().toString(36).substring(2, 6),
     number: () => Math.floor(Math.random() * 10000) + 1,
     randomString: () => "测试输入" + Math.floor(Math.random() * 1000),
@@ -158,43 +280,55 @@
       return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
     },
     text: () => {
+      // 备注类字段按真实工单口吻取值，不再在句尾拼随机数字（一眼假）
       const texts = [
-        "这是一段由自动测试工具生成的随机中文长文本备注内容，仅供占位使用。",
-        "根据最新的业务需求，此处填写相关的详细描述和背景情况。",
-        "测试环境下的多行文本输入测试，为了验证系统对大数据量的边界承受能力和展示效果。",
-        "暂无特殊备注说明，系统默认自动生成的占位数据段落。"
+        '客户反馈已记录，待跟进确认后同步处理结果。',
+        '本批次数据由测试环境生成，仅用于流程验证。',
+        '需求变更已同步至相关同事，预计本周内完成调整。',
+        '经沟通确认，按照现行规范执行，无需额外审批。',
+        '问题已复现，初步定位为配置项缺失，正在修复。',
+        '补充说明：相关附件已上传至共享目录，请注意查收。',
+        '该事项延后至下个迭代处理，当前版本暂不涉及。',
+        '现场反馈情况良好，未发现遗留问题。'
       ];
-      return texts[Math.floor(Math.random() * texts.length)] + Math.floor(Math.random() * 1000);
+      return texts[Math.floor(Math.random() * texts.length)];
     },
-    creditCode: () => {
-      const region = ID_CARD_REGIONS[Math.floor(Math.random() * ID_CARD_REGIONS.length)];
+    creditCode: (session) => {
+      // 登记机关地区码取会话城市，和地址、证件号指向同一个地方
+      const region = getSessionPerson(session).city.adminCode;
       let organizationCode = '';
       for (let i = 0; i < 9; i++) {
         organizationCode += CREDIT_CODE_CHARS[Math.floor(Math.random() * CREDIT_CODE_CHARS.length)];
       }
       return appendCreditCodeCheckDigit('91' + region + organizationCode);
     },
-    company: () => {
-      const cities = ['北京', '上海', '广州', '深圳', '杭州', '厦门', '成都', '武汉'];
-      const names = ['科技', '网络', '信息', '软件', '互动', '教育', '智能', '创投'];
-      const chars = "星辰大海华夏神州创智明远腾飞卓石天瑞云翔";
+    company: (session) => {
+      const city = getSessionPerson(session).city;
+      const industries = ['科技', '网络', '信息', '软件', '互动', '教育', '智能', '创投'];
+      const chars = '星辰大海华夏神州创智明远腾飞卓石天瑞云翔';
       const char1 = chars.charAt(Math.floor(Math.random() * chars.length));
       const char2 = chars.charAt(Math.floor(Math.random() * chars.length));
-      return cities[Math.floor(Math.random() * cities.length)] + char1 + char2 + names[Math.floor(Math.random() * names.length)] + '有限公司';
+      return city.name + char1 + char2 + industries[Math.floor(Math.random() * industries.length)] + '有限公司';
     },
-    licensePlate: () => {
-      const provs = ['京','沪','粤','闽','浙','苏','川','鲁'];
+    licensePlate: (session) => {
+      // 省份简称与发牌地字母取会话城市，和地址里的城市对得上
       const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
       const nums = '0123456789';
-      let p = provs[Math.floor(Math.random() * provs.length)] + letters.charAt(Math.floor(Math.random() * letters.length));
-      for(let i=0; i<5; i++) p += (Math.random()>0.5 ? letters.charAt(Math.floor(Math.random() * letters.length)) : nums.charAt(Math.floor(Math.random() * nums.length)));
-      return p;
+      let plate = getSessionPerson(session).city.plate;
+      for (let i = 0; i < 5; i++) {
+        plate += Math.random() > 0.5
+          ? letters.charAt(Math.floor(Math.random() * letters.length))
+          : nums.charAt(Math.floor(Math.random() * nums.length));
+      }
+      return plate;
     },
-    zipCode: () => {
-      return Math.floor(Math.random() * 900000 + 100000).toString();
-    },
+    zipCode: (session) => getSessionPerson(session).city.zip,
+
     ipv4: () => {
-      return `${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}`;
+      // 首字节跳过 127 回环与 224+ 组播段，末字节跳过 0/255 网络号与广播地址
+      let firstOctet = 0;
+      do { firstOctet = 1 + Math.floor(Math.random() * 222); } while (firstOctet === 127);
+      return `${firstOctet}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${1 + Math.floor(Math.random() * 254)}`;
     },
     mac: () => {
       return "XX:XX:XX:XX:XX:XX".replace(/X/g, () => "0123456789ABCDEF".charAt(Math.floor(Math.random() * 16)));
@@ -209,14 +343,11 @@
         const all = lower + upper + num + special;
         pwd += all.charAt(Math.floor(Math.random()*all.length));
       }
-      return pwd.split('').sort(() => Math.random() - 0.5).join('');
+      return shuffleArray(pwd.split('')).join('');
     },
-    englishName: () => {
-      const firsts = ['James','John','Robert','Michael','William','David','Richard','Mary','Patricia','Linda','Barbara','Elizabeth','Jennifer'];
-      const lasts = ['Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis','Rodriguez','Martinez'];
-      return firsts[Math.floor(Math.random() * firsts.length)] + ' ' + lasts[Math.floor(Math.random() * lasts.length)];
-    },
-    gender: () => (Math.random() > 0.5 ? '男' : '女'),
+    englishName: (session) => getSessionPerson(session).englishName,
+    gender: (session) => getSessionPerson(session).gender,
+
     nickname: () => {
       const prefixes = ['测试', '演示', '体验', '样例', '模拟'];
       return prefixes[Math.floor(Math.random() * prefixes.length)] + '用户' + Math.floor(Math.random() * 9000 + 1000);
@@ -236,11 +367,9 @@
       return 'ORD' + stamp + Math.floor(Math.random() * 900 + 100);
     },
     percentage: () => (Math.random() * 100).toFixed(2) + '%',
-    city: () => {
-      const cities = ['北京市', '上海市', '广州市', '深圳市', '杭州市', '厦门市', '成都市', '武汉市'];
-      return cities[Math.floor(Math.random() * cities.length)];
-    },
-    age: () => Math.floor(Math.random() * 43) + 18,
+    city: (session) => getSessionPerson(session).city.name + '市',
+    age: (session) => getSessionPerson(session).age,
+
     amount: () => (Math.random() * 9999).toFixed(2),
     color: () => '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0'),
     dateTime: () => {
@@ -278,8 +407,11 @@
     return values[Math.floor(getSessionRandom(session)() * values.length)];
   }
 
-  function createMockSession() {
-    const seed = String(CONFIG.RANDOM_SEED || '').trim();
+  function createMockSession(variant) {
+    const seedText = String(CONFIG.RANDOM_SEED || '').trim();
+    // 同一种子 + 不同变体会派生出不同序列：点选填充靠它实现「换一个」，
+    // 否则固定种子下每次点击都会从种子起点重放出同一批数据
+    const seed = seedText && variant ? `${seedText}#${variant}` : seedText;
     const profileKey = DATA_PROFILES[CONFIG.DATA_PROFILE] ? CONFIG.DATA_PROFILE : 'general';
     const random = seed ? createSeededRandom(seed) : Math.random;
     const baseDate = seed
@@ -303,6 +435,84 @@
     };
   }
 
+  // 会话级业务上下文：同一张表单里的城市、区县、街道、公司、门店、账号、邮箱共享一套数据，
+  // 避免每个字段各自随机，导致同一份资料前后矛盾（例如城市和街道对不上）
+  function getBusinessContext(session) {
+    if (!session) {
+      const city = pickSessionValue(BUSINESS_CITIES);
+      return {
+        city,
+        brand: pickSessionValue(BUSINESS_BRANDS),
+        street: pickSessionValue(city.streets),
+        serial: String(Math.floor(Math.random() * 900000) + 100000)
+      };
+    }
+    if (!session.businessContext) session.businessContext = {};
+    const context = session.businessContext;
+    if (!context.city) context.city = pickSessionValue(BUSINESS_CITIES, session);
+    if (!context.brand) context.brand = pickSessionValue(BUSINESS_BRANDS, session);
+    if (!context.street) context.street = pickSessionValue(context.city.streets, session);
+    if (!context.serial) context.serial = getProfileSerial(session);
+    return context;
+  }
+
+  function buildBusinessAddress(session) {
+    const context = getBusinessContext(session);
+    const streetNumber = 1 + Math.floor(getSessionRandom(session)() * 199);
+    return `${context.city.name}市${context.city.district}${context.street}${streetNumber}号`;
+  }
+
+  // 同一个人的资料只算一次：姓名、拼音、性别、生日、邮箱、城市都从这里派生。
+  // 否则会出现「性别女 + 身份证第 17 位是奇数」「年龄 25 + 证件显示 1972 年生」这类自相矛盾的组合
+  function getSessionPerson(session) {
+    if (session && session.person) return session.person;
+    const random = session ? getSessionRandom(session) : Math.random;
+    const pick = list => list[Math.floor(random() * list.length)];
+    const city = getBusinessContext(session).city;
+    const surname = pick(PERSON_SURNAME_POOL);
+    const gender = random() > 0.5 ? '男' : '女';
+    const givenPool = gender === '男' ? GIVEN_NAMES_MALE : GIVEN_NAMES_FEMALE;
+    const givenFirst = pick(givenPool);
+    // 双字名占了现实里的大多数，单字名只保留三成
+    const givenSecond = random() < 0.7 ? pick(givenPool) : null;
+    const givenChars = givenFirst.char + (givenSecond ? givenSecond.char : '');
+    const givenPinyin = givenFirst.pinyin + (givenSecond ? givenSecond.pinyin : '');
+    const pinyin = surname.pinyin + givenPinyin;
+
+    const now = new Date();
+    const ageYears = PERSON_AGE_RANGE[0] + Math.floor(random() * (PERSON_AGE_RANGE[1] - PERSON_AGE_RANGE[0] + 1));
+    const birthMonth = Math.floor(random() * 12);
+    const birthDay = 1 + Math.floor(random() * 28);
+    const birthDate = new Date(now.getFullYear() - ageYears, birthMonth, birthDay);
+    // 生日还没过就还没满岁，年龄按整岁算，和证件上的出生日期严格一致
+    let age = now.getFullYear() - birthDate.getFullYear();
+    if (now.getMonth() < birthMonth || (now.getMonth() === birthMonth && now.getDate() < birthDay)) age -= 1;
+    const pad = value => String(value).padStart(2, '0');
+    // 部分站点会拒绝纯拼音邮箱，尾部按概率补两位数字，也更接近真实注册习惯
+    const emailSuffix = random() < 0.5 ? String(Math.floor(random() * 90) + 10) : '';
+    const person = {
+      gender,
+      name: surname.char + givenChars,
+      pinyin,
+      englishName: surname.pinyin.charAt(0).toUpperCase() + surname.pinyin.slice(1)
+        + ' ' + givenPinyin.charAt(0).toUpperCase() + givenPinyin.slice(1),
+      birthDate,
+      birthText: `${birthDate.getFullYear()}${pad(birthMonth + 1)}${pad(birthDay)}`,
+      age,
+      city,
+      email: `${pinyin}${emailSuffix}@${pick(EMAIL_DOMAINS)}`
+    };
+    if (session) session.person = person;
+    return person;
+  }
+
+  function parseNamePairs(text) {
+    return String(text).split(',').map(item => {
+      const [char, pinyin] = item.split('|');
+      return { char, pinyin };
+    });
+  }
+
   function cloneSnapshotValue(value) {
     if (Array.isArray(value)) return value.slice();
     if (value instanceof Date) return new Date(value.getTime());
@@ -320,6 +530,9 @@
     for (let i = 0; i < candidates.length; i++) {
       if (candidates[i] !== undefined) return { exists: true, value: cloneSnapshotValue(candidates[i]) };
     }
+    // 组件声明了 value / modelValue 时，undefined 本身就是有效状态（例如尚未选择的 Select）。
+    // 只有记录成快照，撤销才能把组件模型复位，而不是只改内层 input 的显示值。
+    if (canAcceptComponentValue(vueInstance)) return { exists: true, value: undefined };
     return { exists: false };
   }
 
@@ -337,8 +550,16 @@
     else if (inputEl.type === 'radio' && inputEl.name) {
       snapshot.radioStates = getNativeRadioGroup(inputEl)
         .map(input => ({ input, checked: input.checked }));
-    } else if (inputEl.type === 'checkbox') snapshot.checked = inputEl.checked;
-    else snapshot.value = inputEl.value;
+    } else if (inputEl.type === 'checkbox') {
+      // 复选组共用一个 v-model，只记第一个 input 的 checked 会让撤销后其余项仍保持选中
+      const checkboxGroup = typeof inputEl.closest === 'function'
+        ? inputEl.closest('.el-checkbox-group, .ant-checkbox-group')
+        : null;
+      if (checkboxGroup) {
+        snapshot.checkboxStates = Array.from(checkboxGroup.querySelectorAll('input[type="checkbox"]'))
+          .map(input => ({ input, checked: input.checked }));
+      } else snapshot.checked = inputEl.checked;
+    } else snapshot.value = inputEl.value;
     return snapshot;
   }
 
@@ -347,6 +568,9 @@
     const inputEl = snapshot.inputEl;
     const vueInstance = getVueInstance(inputEl);
     if (snapshot.vueValue && snapshot.vueValue.exists && emitComponentValue(vueInstance, snapshot.vueValue.value)) return true;
+    // 有 Vue 实例的下拉/级联/日期组件，写内层 input 的 value 只改显示、不改 model，
+    // 宁可报告“跳过”也不要让撤销提示假成功
+    if (vueInstance && (snapshot.kind === 'semantic-select' || snapshot.kind === 'cascader' || snapshot.kind === 'date-picker')) return false;
     if (inputEl.isContentEditable) {
       inputEl.textContent = snapshot.content || '';
       dispatchFieldEvents(inputEl);
@@ -354,6 +578,13 @@
     }
     if (Array.isArray(snapshot.selectedValues)) {
       Array.from(inputEl.options || []).forEach(option => setNativeProperty(option, 'selected', snapshot.selectedValues.includes(option.value)));
+      dispatchFieldEvents(inputEl);
+      return true;
+    }
+    if (Array.isArray(snapshot.checkboxStates)) {
+      snapshot.checkboxStates.forEach(item => {
+        if (item.input && item.input.isConnected) setNativeProperty(item.input, 'checked', item.checked);
+      });
       dispatchFieldEvents(inputEl);
       return true;
     }
@@ -369,6 +600,8 @@
       dispatchFieldEvents(inputEl);
       return true;
     }
+    // 组件根节点没有原生 value；拿不到 Vue 实例时写 expando 只是假成功
+    if (inputEl.nodeType === 1 && typeof inputEl.matches === 'function' && inputEl.matches(COMPONENT_FIELD_SELECTORS)) return false;
     if (!setNativeProperty(inputEl, 'value', snapshot.value == null ? '' : snapshot.value)) return false;
     dispatchFieldEvents(inputEl);
     return true;
@@ -379,9 +612,10 @@
   }
 
   function recordOperationSnapshot(operation, snapshot, outcome) {
-    if (!operation || !snapshot || !outcome) return;
+    if (!operation || !outcome) return;
     if (outcome.status === 'filled') {
-      if (operation.snapshots.length < 500) operation.snapshots.push(snapshot);
+      // 快照缺失（字段在采集与填充之间被重渲染移除）时仍要计数，否则摘要与撤销数量对不上
+      if (snapshot && operation.snapshots.length < 500) operation.snapshots.push(snapshot);
       operation.filled++;
     } else operation.skipped++;
   }
@@ -457,10 +691,22 @@
     return undefined;
   }
 
-  function buildSessionTemporalValue(command, session) {
+  function buildSessionTemporalValue(command, session, hint) {
     if (!session || !session.seed || !session.baseDate) return undefined;
     const date = new Date(session.baseDate);
     const pad = value => String(value).padStart(2, '0');
+    // 配了随机种子后所有时间字段原本都用同一个 baseDate，开始/结束时间会完全一样；
+    // 这里按字段语义拉开：结束类字段落在开始之后 7-90 天，其余字段在 30 天窗口内浮动
+    if (hint === 'end') {
+      if (!session.temporalEndDate) {
+        const endDate = new Date(session.baseDate);
+        endDate.setDate(endDate.getDate() + 7 + Math.floor(getSessionRandom(session)() * 84));
+        session.temporalEndDate = endDate;
+      }
+      date.setTime(session.temporalEndDate.getTime());
+    } else if (hint !== 'start') {
+      date.setDate(date.getDate() + Math.floor(getSessionRandom(session)() * 30));
+    }
     if (command === 'date') return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
     if (command === 'time') return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
     if (command === 'dateTime') return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
@@ -471,19 +717,19 @@
     return undefined;
   }
 
-  function generateMockValue(command, session) {
+  function generateMockValue(command, session, hint) {
     if (!command || !MockFactory[command]) return withSessionRandom(session, () => MockFactory.randomString());
     if (session && STICKY_MOCK_COMMANDS.has(command) && session.commandValues.has(command)) {
       return session.commandValues.get(command);
     }
 
     const profileValue = buildProfileMockValue(command, session);
-    const temporalValue = buildSessionTemporalValue(command, session);
+    const temporalValue = buildSessionTemporalValue(command, session, hint);
     const value = profileValue !== undefined
       ? profileValue
       : temporalValue !== undefined
         ? temporalValue
-        : withSessionRandom(session, () => MockFactory[command]());
+        : withSessionRandom(session, () => MockFactory[command](session));
     if (session && STICKY_MOCK_COMMANDS.has(command)) session.commandValues.set(command, value);
     return value;
   }
@@ -491,6 +737,57 @@
   function normalizeStringList(value) {
     const source = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
     return source.map(item => String(item || '').trim()).filter(Boolean).slice(0, 100);
+  }
+
+  // 用户配置的正则会在主线程对页面标签同步执行；嵌套量词是最常见的灾难性回溯形态。
+  // 保存/归一化阶段直接拒绝，并对编译结果做有界缓存，避免热路径反复 new RegExp
+  const USER_REGEX_CACHE_LIMIT = 200;
+  const userRegexCache = new Map();
+
+  function isUnsafeUserRegex(pattern) {
+    const source = String(pattern || '');
+    if (!source || source.length > 500) return true;
+    // 逐层匹配括号：某个分组被无上界量词重复，且组内含分支/量词时，可能出现可重叠匹配
+    const stack = [];
+    for (let i = 0; i < source.length; i++) {
+      const ch = source[i];
+      if (ch === '\\') { i++; continue; }
+      if (ch === '[') {
+        let j = i + 1;
+        while (j < source.length && source[j] !== ']') {
+          if (source[j] === '\\') j++;
+          j++;
+        }
+        i = j;
+        continue;
+      }
+      if (ch === '(') { stack.push(i); continue; }
+      if (ch !== ')' || !stack.length) continue;
+      const start = stack.pop();
+      const rest = source.slice(i + 1);
+      // 只关心无上界的 + / * / {m,}
+      if (!/^([+*]|\{\s*\d*\s*,\s*\})/.test(rest)) continue;
+      const inner = source.slice(start + 1, i);
+      if (/[|+*]/.test(inner) || /\{\s*\d*\s*,\s*\}/.test(inner)) return true;
+    }
+    return false;
+  }
+
+  function getCachedUserRegex(pattern, flags) {
+    const key = `${flags || ''}:${pattern}`;
+    if (userRegexCache.has(key)) {
+      const cached = userRegexCache.get(key);
+      // 命中后重新入队，Map 的插入顺序才等价于 LRU（否则淘汰的永远是最早编译的那条）
+      userRegexCache.delete(key);
+      userRegexCache.set(key, cached);
+      return cached;
+    }
+    const compiled = new RegExp(pattern, flags);
+    if (userRegexCache.size >= USER_REGEX_CACHE_LIMIT) {
+      userRegexCache.delete(userRegexCache.keys().next().value);
+    }
+    userRegexCache.set(key, compiled);
+    return compiled;
   }
 
   function normalizeSiteRule(rule) {
@@ -503,8 +800,12 @@
         const normalizedPattern = String(pattern || '').trim();
         const normalizedLabel = String(label || '').trim();
         if (!normalizedPattern || !normalizedLabel) return;
+        if (isUnsafeUserRegex(normalizedPattern)) {
+          console.warn('[AutoMock] 已忽略存在回溯风险的站点字段别名正则:', normalizedPattern);
+          return;
+        }
         try {
-          new RegExp(normalizedPattern, 'i');
+          getCachedUserRegex(normalizedPattern, 'i');
           fieldAliases[normalizedPattern] = normalizedLabel;
         } catch (error) {}
       });
@@ -523,6 +824,21 @@
   function normalizeSiteRules(rules) {
     if (!Array.isArray(rules)) return [];
     return rules.map(normalizeSiteRule).filter(Boolean).slice(0, 50);
+  }
+
+  // 站点规则在 pointer/click 热路径被反复查询，按配置数组引用 + hostname 缓存归一化结果
+  let siteRuleCache = { rulesRef: null, host: '', normalized: [], rule: null };
+
+  function getNormalizedSiteRules() {
+    if (siteRuleCache.rulesRef !== CONFIG.SITE_RULES) {
+      siteRuleCache = {
+        rulesRef: CONFIG.SITE_RULES,
+        host: '',
+        normalized: normalizeSiteRules(CONFIG.SITE_RULES),
+        rule: null
+      };
+    }
+    return siteRuleCache.normalized;
   }
 
   function parseSiteRulesText(text) {
@@ -544,8 +860,12 @@
 
   function getActiveSiteRule() {
     const host = typeof window !== 'undefined' && window.location ? window.location.hostname : '';
-    const rules = normalizeSiteRules(CONFIG.SITE_RULES);
-    return rules.find(rule => rule.hosts.some(pattern => isHostMatched(host, pattern))) || null;
+    const rules = getNormalizedSiteRules();
+    if (siteRuleCache.host === host) return siteRuleCache.rule;
+    const rule = rules.find(item => item.hosts.some(pattern => isHostMatched(host, pattern))) || null;
+    siteRuleCache.host = host;
+    siteRuleCache.rule = rule;
+    return rule;
   }
 
   function getRuleStringList(key) {
@@ -630,7 +950,7 @@
     const label = String(labelText || '').trim();
     for (const [pattern, alias] of Object.entries(rule.fieldAliases)) {
       try {
-        if (new RegExp(pattern, 'i').test(label)) return alias;
+        if (getCachedUserRegex(pattern, 'i').test(label)) return alias;
       } catch (error) {}
     }
     return label;
@@ -727,6 +1047,8 @@
   function predictMockTypes(label, limit = 3) {
     const labelText = String(label == null ? '' : label).trim();
     const labelLower = labelText.toLowerCase();
+    // 正则只对前 200 字符匹配，限制异常长标签放大回溯成本
+    const labelForRegex = labelLower.slice(0, 200);
     const predictions = [];
 
     if (CONFIG.CUSTOM_DICTS && CONFIG.CUSTOM_DICTS.length > 0) {
@@ -734,7 +1056,7 @@
         const dict = CONFIG.CUSTOM_DICTS[i];
         if (!dict || !dict.regex) continue;
         try {
-          if (new RegExp(dict.regex, 'i').test(labelLower)) {
+          if (getCachedUserRegex(dict.regex, 'i').test(labelForRegex)) {
             predictions.push({ cmd: '__custom_' + i, name: dict.label || '自定义值', score: 1000 - i });
           }
         } catch (e) {
@@ -746,7 +1068,8 @@
     BUILTIN_MOCK_ITEMS.forEach((item, index) => {
       let score = 0;
       item.patterns.forEach(pattern => {
-        if (pattern.test(labelLower)) score += 10;
+        // 与自定义字典一致，只看前 200 字符：标签再长也只取开头的语义部分，避免长文本字段让正则回溯失控
+        if (pattern.test(labelForRegex)) score += 10;
       });
       if (score > 0) {
         predictions.push({ cmd: item.cmd, name: item.label, score, index });
@@ -793,6 +1116,17 @@
   const SELECT_WRAPPER_SELECTORS = '.el-select, .el-select-v2, .el-cascader, .el-tree-select, .ant-select, .ant-cascader, [role="combobox"]';
   // 动态续填会反复重试被跳过的下拉/日期字段，超过次数后放弃，避免在监听窗口内循环开合下拉
   const MAX_DEFERRED_FIELD_ATTEMPTS = 3;
+  // Select / Cascader / Autocomplete / DatePicker 内部还会再包一层 .el-input，
+  // 若直接 closest('.el-input') 会先命中内层 ElInput，组件钩子、候选项上下文与撤销都会失效
+  const FIELD_COMPONENT_WRAPPER_SELECTORS = '.el-select, .el-select-v2, .el-tree-select, .el-cascader, .el-autocomplete, .el-date-editor, .el-radio-group, .el-checkbox-group, .el-switch, .ant-select, .ant-picker, .ant-cascader, .ant-radio-group, .ant-checkbox-group';
+  // Element / Ant 的单选、复选、开关把真实 input 设为 opacity:0 或零尺寸，靠外层 label 承接点击。
+  // 按原生可见性判断会把它们全部剔除，导致批量填充与校验都碰不到这些组件
+  const HIDDEN_NATIVE_INPUT_CLASSES = [
+    'el-radio__original', 'el-checkbox__original', 'el-radio-button__orig-radio',
+    'el-checkbox-button__original', 'el-switch__input',
+    'ant-radio-input', 'ant-radio-button-input', 'ant-checkbox-input'
+  ];
+  const HIDDEN_NATIVE_INPUT_WRAPPER_SELECTORS = '.el-radio, .el-checkbox, .el-radio-button, .el-checkbox-button, .el-switch, .ant-radio, .ant-radio-wrapper, .ant-radio-button-wrapper, .ant-checkbox, .ant-checkbox-wrapper';
 
   function pickCascaderLeafPath(options, session, keys = {}) {
     const valueKey = keys.value || 'value';
@@ -1047,14 +1381,6 @@
     return (session) => CustomHooks[componentName](vueInstance, labelText, session);
   }
 
-  function normalizeCandidateText(value) {
-    return String(value == null ? '' : value)
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, '')
-      .replace(/[：:，,。、“”"'`（）()【】\[\]{}<>]/g, '');
-  }
-
   function getCandidateOptions(vueInstance, componentName) {
     if (!vueInstance) return [];
 
@@ -1126,7 +1452,8 @@
     if (context && context.supportsAiSuggestion) {
       const options = getCandidateOptions(context.vueInstance, context.componentName);
       if (options.length > 0) {
-        lines.push(`当前候选项：${options.slice(0, 20).map(opt => opt.label).join('、')}`);
+        // 候选项是页面里的业务文本，会随请求上行：最多 20 条、每条最多 30 字，设置面板里已写明这一点
+        lines.push(`当前候选项：${options.slice(0, 20).map(opt => String(opt.label).slice(0, 30)).join('、')}`);
       }
     }
 
@@ -1173,6 +1500,12 @@
       return { error: 'AI 返回内容不是类目数组' };
     }
 
+    // 空数组是模型给出的有效结论（该字段没有合适类目），缓存下来避免对同一字段反复追问；
+    // 只有“给了类目但一个都认不出来”才算解析失败，避免把模型乱编的内容当成信号
+    if (parsed.length === 0) {
+      return { value: [] };
+    }
+
     const validCmds = [];
     parsed.forEach(item => {
       const cmd = String(item == null ? '' : item).trim();
@@ -1190,19 +1523,29 @@
   const AI_REQUEST_TIMEOUT_MS = 15000;
   const AI_RATE_LIMIT_WINDOW_MS = 60000;
   const AI_RATE_LIMIT_MAX = 30;
+  // 失败结果的短暂记录：自动预加载在窗口内不再对同一字段重复请求；手动打开/刷新 Spotlight 不受影响
+  const AI_FAILURE_CACHE_TTL_MS = 30000;
   const DEEPSEEK_CACHE_LIMIT = 100;
+  // 缓存值是已解析并校验过的 cmd 数组，命中时不必再解析；键见 getAiRecommendationCacheKey，不含会随联动变化的候选项
   const deepseekCache = new Map();
+  const deepseekFailureCache = new Map();
   const deepseekPendingRequests = new Map();
   const aiRequestTimestamps = [];
 
-  function isAiRateLimited() {
+  // 返回占位标识，窗口内已达上限时返回 null；请求没拿到有效响应时用 releaseAiRequestSlot 退还
+  function acquireAiRequestSlot() {
     const now = Date.now();
     while (aiRequestTimestamps.length && now - aiRequestTimestamps[0] > AI_RATE_LIMIT_WINDOW_MS) {
       aiRequestTimestamps.shift();
     }
-    if (aiRequestTimestamps.length >= AI_RATE_LIMIT_MAX) return true;
+    if (aiRequestTimestamps.length >= AI_RATE_LIMIT_MAX) return null;
     aiRequestTimestamps.push(now);
-    return false;
+    return now;
+  }
+
+  function releaseAiRequestSlot(slot) {
+    const index = aiRequestTimestamps.indexOf(slot);
+    if (index >= 0) aiRequestTimestamps.splice(index, 1);
   }
 
   function cacheDeepSeekResult(promptKey, value) {
@@ -1214,8 +1557,58 @@
     }
   }
 
+  function rememberAiFailure(cacheKey, error) {
+    if (!cacheKey) return;
+    deepseekFailureCache.delete(cacheKey);
+    deepseekFailureCache.set(cacheKey, { error, expireAt: Date.now() + AI_FAILURE_CACHE_TTL_MS });
+    while (deepseekFailureCache.size > DEEPSEEK_CACHE_LIMIT) {
+      deepseekFailureCache.delete(deepseekFailureCache.keys().next().value);
+    }
+  }
+
+  function hasRecentAiFailure(cacheKey) {
+    const entry = deepseekFailureCache.get(cacheKey);
+    if (!entry) return false;
+    if (entry.expireAt > Date.now()) return true;
+    deepseekFailureCache.delete(cacheKey);
+    return false;
+  }
+
+  // 接口地址、Key、模型或自定义字典变化后，旧结果与旧失败记录都不再可信
+  function clearAiCaches() {
+    deepseekCache.clear();
+    deepseekFailureCache.clear();
+  }
+
   function isOfficialDeepSeekApi(url) {
     return typeof url === 'string' && /^https:\/\/api\.deepseek\.com\//i.test(url);
+  }
+
+  // API Key 会以 Bearer 明文发出：只允许 https；http 仅限本机/内网地址，避免误配置把 Key 发到公网
+  function isPrivateIpv4(host) {
+    const parts = String(host || '').split('.');
+    if (parts.length !== 4) return false;
+    const octets = parts.map(part => (/^\d{1,3}$/.test(part) ? Number(part) : NaN));
+    if (octets.some(octet => !Number.isFinite(octet) || octet > 255)) return false;
+    return octets[0] === 10
+      || octets[0] === 127
+      || (octets[0] === 192 && octets[1] === 168)
+      || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31);
+  }
+
+  function isAllowedAiEndpoint(url) {
+    try {
+      const parsed = new URL(String(url));
+      if (parsed.protocol === 'https:') return true;
+      if (parsed.protocol !== 'http:') return false;
+      const host = parsed.hostname.replace(/^\[|\]$/g, '');
+      // 必须是纯 IPv4 私网地址或本机域名；10.example.com 这类公网域名不能按前缀放行
+      return host === 'localhost' || host === '::1'
+        || isPrivateIpv4(host)
+        || /\.local$|\.internal$/i.test(host);
+    } catch (error) {
+      return false;
+    }
   }
 
   function extractDeepSeekResult(data) {
@@ -1238,32 +1631,46 @@
     return { error: errMsg };
   }
 
-  function askDeepSeek(label, promptText, systemPrompt) {
+  // 只负责一次请求：返回 null（未配置 Key）、{ error }，或模型返回的原文。
+  // 缓存、解析与失败记录由 requestAiRecommendation 负责
+  function askDeepSeek(promptText, systemPrompt) {
     return new Promise((resolve) => {
       let settled = false;
+      let requestSlot = null;
       const settle = (value) => {
         if (settled) return;
         settled = true;
         resolve(value);
       };
+      // 没拿到有效响应的请求不占配额，否则一次超时或 401 会把之后 60 秒的推荐全部锁成“请求过于频繁”。
+      // 服务端明确返回 429 时例外：保留占位，避免继续加压
+      const fail = (error, keepSlot) => {
+        if (requestSlot !== null && !keepSlot) releaseAiRequestSlot(requestSlot);
+        requestSlot = null;
+        settle({ error });
+      };
 
-      if (!CONFIG.DEEPSEEK_API_KEY) return settle(null);
+      if (!CONFIG.DEEPSEEK_API_KEY || !promptText) return settle(null);
       if (typeof GM_xmlhttpRequest === 'undefined') {
         console.error("[AutoMock AI] 当前环境不支持 GM_xmlhttpRequest，无法发起跨域大模型请求。");
         return settle({ error: "由于环境限制 (非原生油猴)，无法发起跨域请求。" });
       }
-      const promptKey = promptText || label;
-      if (deepseekCache.has(promptKey)) return settle(deepseekCache.get(promptKey));
-      if (isAiRateLimited()) {
+      const requestUrl = CONFIG.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions';
+      if (!isAllowedAiEndpoint(requestUrl)) {
+        console.error('[AutoMock AI] 已拒绝不安全的接口地址:', requestUrl);
+        return settle({ error: 'AI 接口地址不安全：仅允许 https，或 http 的 localhost/内网地址' });
+      }
+      // 本地校验都通过、确定要发请求时才占配额
+      requestSlot = acquireAiRequestSlot();
+      if (requestSlot === null) {
         return settle({ error: 'AI 请求过于频繁（30 次/分钟），请稍后再试' });
       }
-
-      const requestUrl = CONFIG.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1/chat/completions';
       const requestBody = {
         model: CONFIG.DEEPSEEK_API_MODEL || "deepseek-v4-flash",
         messages: [
           { role: "system", content: systemPrompt || getAiRecommendationSystemPrompt() },
-          { role: "user", content: `字段名：${promptKey}` }
+          // prompt 自身已以“字段名：”开头，不再额外加前缀
+          { role: "user", content: promptText }
         ],
         temperature: 0.1,
         max_tokens: 200
@@ -1292,8 +1699,9 @@
                   if (errData.error && errData.error.message) errMsg += ": " + errData.error.message;
                 } catch(e) {}
               }
-              return settle({ error: errMsg });
+              return fail(errMsg, res.status === 429);
             }
+            // 2xx 说明请求已被服务端处理：之后的空内容/解析问题是模型输出问题，不退还配额
             if (!res.responseText) {
               console.error("DeepSeek Empty Response");
               return settle({ error: "服务器返回了空内容" });
@@ -1302,7 +1710,6 @@
               const data = JSON.parse(res.responseText);
               const extracted = extractDeepSeekResult(data);
               if (extracted.value) {
-                cacheDeepSeekResult(promptKey, extracted.value);
                 settle(extracted.value);
               } else {
                 console.error("[AutoMock AI] 可填结果为空:", extracted.error, data);
@@ -1315,60 +1722,77 @@
           },
           onerror: function(err) {
             console.error("[AutoMock AI] 网络请求失败:", err);
-            settle({ error: "网络请求失败，可能是跨域或服务无法访问" });
+            fail("网络请求失败，可能是跨域或服务无法访问");
           },
           ontimeout: function() {
             console.error(`[AutoMock AI] 请求超时 (${AI_REQUEST_TIMEOUT_MS}ms)`);
-            settle({ error: "AI 请求超时，请稍后重试" });
+            fail("AI 请求超时，请稍后重试");
           },
           onabort: function() {
-            settle({ error: "AI 请求已取消" });
+            fail("AI 请求已取消");
           }
         });
       } catch (error) {
         console.error("[AutoMock AI] 请求初始化失败:", error);
-        settle({ error: "AI 请求初始化失败: " + String(error) });
+        fail("AI 请求初始化失败: " + String(error));
       }
     });
   }
 
-  function getCachedAiRecommendationResult(promptKey) {
-    if (!promptKey || !deepseekCache.has(promptKey)) return null;
-    const cachedText = deepseekCache.get(promptKey);
-    if (!cachedText || (cachedText && cachedText.error)) return null;
-    const parsed = parseAiRecommendationResult(cachedText);
-    return parsed.error ? null : parsed.value;
+  // 返回 null 表示从未缓存过；返回空数组表示「缓存过，AI 判定该字段没有合适类目」。
+  // 两者必须区分：前者要发请求，后者再发请求也只会得到同样的空结果
+  function getCachedAiRecommendationResult(cacheKey) {
+    if (!cacheKey || !deepseekCache.has(cacheKey)) return null;
+    const cached = deepseekCache.get(cacheKey);
+    if (!Array.isArray(cached)) return null;
+    // 命中后重新入队，Map 的插入顺序才等价于 LRU（否则淘汰的永远是最早写入的那条）
+    deepseekCache.delete(cacheKey);
+    deepseekCache.set(cacheKey, cached);
+    return cached.slice();
   }
 
-  function requestAiRecommendation(promptKey, labelText, systemPrompt) {
-    if (!promptKey || !CONFIG.DEEPSEEK_API_KEY || CONFIG.AI_ENABLE_CLASSIFICATION === false) return Promise.resolve([]);
+  // 缓存、去重与失败记录共用的键，只取字段的稳定特征。
+  // 候选项会随级联联动变化，放进键里会让同一字段反复换键、重复请求
+  function getAiRecommendationCacheKey(context) {
+    if (!context) return '';
+    const labelText = String(context.labelText || '').trim() || '未识别';
+    return [labelText, context.componentName || '', context.localHookName || '', context.hookAction ? 'hook' : ''].join('|');
+  }
 
-    const cachedResult = getCachedAiRecommendationResult(promptKey);
-    if (cachedResult) {
-      return Promise.resolve(cachedResult);
+  // 返回 { commands, error }：error 非空表示 AI 调用或解析失败，用来和“未启用 AI”区分开
+  function requestAiRecommendation(cacheKey, promptText, systemPrompt, forceRefresh) {
+    if (!cacheKey || !promptText || !CONFIG.DEEPSEEK_API_KEY || CONFIG.AI_ENABLE_CLASSIFICATION === false) {
+      return Promise.resolve({ commands: [], error: '' });
     }
 
-    if (deepseekPendingRequests.has(promptKey)) {
-      return deepseekPendingRequests.get(promptKey);
+    const cachedResult = getCachedAiRecommendationResult(cacheKey);
+    // 手动刷新只认非空缓存：空结果代表「AI 判定无推荐」，用户明确要求重试时应该再问一次
+    if (cachedResult !== null && !(forceRefresh && cachedResult.length === 0)) {
+      return Promise.resolve({ commands: cachedResult, error: '' });
     }
 
-    const requestPromise = askDeepSeek(labelText, promptKey, systemPrompt)
+    if (deepseekPendingRequests.has(cacheKey)) {
+      return deepseekPendingRequests.get(cacheKey);
+    }
+
+    const requestPromise = askDeepSeek(promptText, systemPrompt)
       .then((aiResult) => {
-        if (!aiResult || (aiResult && aiResult.error)) {
-          return [];
-        }
+        if (!aiResult) return { commands: [], error: '' };
 
-        const parsed = parseAiRecommendationResult(aiResult);
+        const parsed = aiResult.error ? aiResult : parseAiRecommendationResult(aiResult);
         if (parsed.error) {
-          return [];
+          rememberAiFailure(cacheKey, parsed.error);
+          return { commands: [], error: parsed.error };
         }
-        return parsed.value;
+        deepseekFailureCache.delete(cacheKey);
+        cacheDeepSeekResult(cacheKey, parsed.value);
+        return { commands: parsed.value.slice(), error: '' };
       })
       .finally(() => {
-        deepseekPendingRequests.delete(promptKey);
+        deepseekPendingRequests.delete(cacheKey);
       });
 
-    deepseekPendingRequests.set(promptKey, requestPromise);
+    deepseekPendingRequests.set(cacheKey, requestPromise);
     return requestPromise;
   }
 
@@ -1378,7 +1802,7 @@
   let spotlightTargetElement = null;
   let latestInteractionTarget = null;
   let spotlightPreloadTimer = null;
-  let latestPreloadPromptKey = '';
+  let latestPreloadCacheKey = '';
   let latestPreloadTriggerType = '';
   let spotlightKeydownHandler = null;
   let deferredDialogObserver = null;
@@ -1423,8 +1847,7 @@
     '.el-overlay-dialog',
     '.ant-modal-root',
     '.ant-drawer',
-    '.ant-popover',
-    '.ant-dropdown',
+    // .ant-popover / .ant-dropdown 是浮层菜单，不是表单容器；纳入后会把填充范围劫持到浮层
     '[role="dialog"]',
     '[aria-modal="true"]'
   ];
@@ -1452,6 +1875,8 @@
   }
 
   function hasBatchFillCandidate(root) {
+    // 候选根必须至少有一个 getFieldContext 认可的字段：只含禁用/只读/被忽略字段的弹窗（如预览框）
+    // 不能抢走填充范围。some 在首个命中处短路，常见弹窗只会解析一个字段
     return collectFillableInputs(root).some(input => Boolean(getFieldContext(input)));
   }
 
@@ -1488,6 +1913,8 @@
 
     const scheduleDynamicFields = (delay = 120) => {
       if (!deferredDialogObserver) return;
+      // 填充过程中组件会大量改 class/style，自身写入不应再排一轮全量扫描
+      if (session.dynamicFillInProgress) return;
       if (deferredDialogDebounce) clearTimeout(deferredDialogDebounce);
       deferredDialogDebounce = setTimeout(processDynamicFields, delay);
     };
@@ -1495,7 +1922,9 @@
     const fillAndContinue = (options, errorMessage) => {
       fillElementUiForms(options)
         .then(result => {
-          if (result.total > 0) scheduleDynamicFields(0);
+          // 只有本轮确有填入（可能带出新的联动字段）才立即续排；全部跳过/已处理时再扫一遍只是空转，
+          // 之后新出现或被启用的字段仍由 MutationObserver 触发
+          if (result.filled > 0) scheduleDynamicFields(0);
         })
         .catch(error => console.warn(errorMessage, error));
     };
@@ -1524,7 +1953,65 @@
       );
     };
 
-    deferredDialogObserver = new MutationObserver(() => scheduleDynamicFields());
+    // 只跟弹窗相关的变更才触发续填：页面自身的 class/style 抖动（动画、骨架屏、滚动监听）与原逻辑一样会被忽略，
+    // 但旧逻辑是对任何变更都排一次全量扫描，等于把整个 8 秒窗口都变成了全文档重扫
+    // 逐条试探而不是 join 成一个长选择器：站点规则里只要有一条写坏，整串选择器就会抛错、连内置弹窗也识别不了
+    const dialogSelectorList = getEffectiveDialogSelectors();
+    const MAX_DYNAMIC_SCANS = 30;
+    let scanCount = 0;
+
+    const matchesDialogSelector = node => dialogSelectorList.some(selector => {
+      try {
+        return node.matches(selector);
+      } catch (error) {
+        return false;
+      }
+    });
+
+    const isInsideDialog = node => {
+      if (!node || node.nodeType !== 1 || typeof node.closest !== 'function') return false;
+      return dialogSelectorList.some(selector => {
+        try {
+          return Boolean(node.closest(selector));
+        } catch (error) {
+          return false;
+        }
+      });
+    };
+
+    const bringsDialog = node => {
+      if (!node || node.nodeType !== 1) return false;
+      if (matchesDialogSelector(node)) return true;
+      return dialogSelectorList.some(selector => {
+        try {
+          return Boolean(node.querySelector(selector));
+        } catch (error) {
+          return false;
+        }
+      });
+    };
+
+    deferredDialogObserver = new MutationObserver((mutations) => {
+      const relevant = mutations.some(mutation => {
+        const target = mutation.target;
+        if (!target || target.nodeType !== 1 || typeof target.closest !== 'function') return false;
+        // 忽略脚本自身 UI（提示层、Spotlight、设置面板）引起的变更，避免自触发回环
+        if (target.closest('#mock-ext-notice-stack, #mock-ext-spotlight, #mock-ext-settings')) return false;
+        if (isInsideDialog(target)) return true;
+        // 弹窗也可能是被宿主祖先节点的一次 style/class 切换带出来的（v-show、display 切换）
+        if (bringsDialog(target)) return true;
+        if (mutation.type !== 'childList') return false;
+        return Array.from(mutation.addedNodes || []).some(bringsDialog);
+      });
+      if (!relevant) return;
+      // 页面持续抖动时不能无限续排（每次续排都是一次全量字段扫描），预算用尽就停，等下一次 Alt+Z
+      if (scanCount >= MAX_DYNAMIC_SCANS) {
+        stopDeferredDialogFill();
+        return;
+      }
+      scanCount++;
+      scheduleDynamicFields();
+    });
     deferredDialogObserver.observe(observeRoot, {
       childList: true,
       subtree: true,
@@ -1536,8 +2023,18 @@
     deferredDialogTimer = setTimeout(stopDeferredDialogFill, windowMs);
   }
 
+  function isHiddenNativeInput(input) {
+    if (!input || input.nodeType !== 1 || input.tagName !== 'INPUT') return false;
+    return HIDDEN_NATIVE_INPUT_CLASSES.some(className => input.classList.contains(className));
+  }
+
   function isFieldVisible(input) {
     if (isElementVisible(input)) return true;
+    // 隐藏原生控件的可见性由外层 label / switch 决定，不能按 input 自身判断
+    if (isHiddenNativeInput(input)) {
+      const wrapper = typeof input.closest === 'function' ? input.closest(HIDDEN_NATIVE_INPUT_WRAPPER_SELECTORS) : null;
+      return Boolean(wrapper && isElementVisible(wrapper));
+    }
     const componentRoot = input.closest(FIELD_CONTAINER_SELECTORS);
     return Boolean(componentRoot && isElementVisible(componentRoot));
   }
@@ -1556,6 +2053,10 @@
       if (seen.has(input)) return false;
       seen.add(input);
       if (input.closest(AUTO_MOCK_UI_SELECTOR)) return false;
+      // 日期范围选择器的外层 div 也带 el-input__inner，非表单元素先剔除，避免遮挡真实输入
+      if (!isFormFieldElement(input)) return false;
+      // 可搜索 Select 的过滤框只用于输入关键词，不是数据字段
+      if (typeof input.matches === 'function' && input.matches('.el-select__input')) return false;
       // Transfer 面板内的复选框只控制「待移动」勾选，不直接对应 v-model，跳过以免影响右侧列表
       if (input.closest(COMPONENT_WITH_INNER_CONTROLS) && !input.matches(COMPONENT_WITH_INNER_CONTROLS)) return false;
       return isFieldVisible(input);
@@ -1662,11 +2163,10 @@
       .map(input => ({ inputEl: input, kind: getFieldKind(input) }));
   }
 
-  function rememberLatestInteraction(target) {
+  function rememberLatestInteraction(target, fieldElement) {
     const element = normalizeElement(target);
     if (!element) return;
 
-    const fieldElement = resolveMockFieldElement(element);
     if (fieldElement) {
       latestInteractionTarget = element;
       spotlightTargetElement = fieldElement;
@@ -1678,39 +2178,51 @@
     }
   }
 
-  function getAiPreloadPromptKey(context) {
+  function isAiPreloadEnabled() {
+    return Boolean(CONFIG.DEEPSEEK_API_KEY) && CONFIG.AI_ENABLE_CLASSIFICATION !== false && CONFIG.AI_ENABLE_PRELOAD !== false;
+  }
+
+  // 指针/焦点事件在捕获阶段对全页触发。先做一次廉价的容器判定，
+  // 否则鼠标划过任意元素都会跑字段解析。判定口径与 resolveMockFieldElement 的候选容器保持一致
+  function getPotentialFieldTarget(target) {
+    const element = normalizeElement(target);
+    if (!element || element.nodeType !== 1 || typeof element.closest !== 'function') return null;
+    // 脚本自己的面板里也有 input / textarea，点击它们不应当成页面字段
+    if (element.closest(AUTO_MOCK_UI_SELECTOR)) return null;
+    if (isFormFieldElement(element) || element.closest(FIELD_CONTAINER_SELECTORS) || element.closest('td, th')) return element;
+    return null;
+  }
+
+  // 预加载、缓存与失败记录共用同一个键；不满足预加载条件时返回空串
+  function getAiPreloadCacheKey(context) {
     if (!context || !CONFIG.DEEPSEEK_API_KEY || CONFIG.AI_ENABLE_CLASSIFICATION === false || CONFIG.AI_ENABLE_PRELOAD === false || isLocalOnlyHookComponent(context.componentName)) return '';
-    return getAiRecommendationPrompt(context);
+    return getAiRecommendationCacheKey(context);
   }
 
   function scheduleAiRecommendationPreload(context, options = {}) {
     const triggerType = options.triggerType === 'hover' ? 'hover' : 'active';
-    const promptKey = getAiPreloadPromptKey(context);
-    if (!promptKey) {
+    const cacheKey = getAiPreloadCacheKey(context);
+    if (!cacheKey) {
       if (spotlightPreloadTimer) {
         clearTimeout(spotlightPreloadTimer);
         spotlightPreloadTimer = null;
       }
-      latestPreloadPromptKey = '';
+      latestPreloadCacheKey = '';
       latestPreloadTriggerType = '';
       return;
     }
 
-    if (getCachedAiRecommendationResult(promptKey)) {
-      latestPreloadPromptKey = promptKey;
-      latestPreloadTriggerType = triggerType;
-      return;
-    }
-
-    if (deepseekPendingRequests.has(promptKey)) {
-      latestPreloadPromptKey = promptKey;
+    // 已有结果、请求在途、窗口内刚失败过：都不再自动发请求。
+    // 失败记录只拦自动预加载，手动打开或刷新 Spotlight 仍会重试
+    if (getCachedAiRecommendationResult(cacheKey) !== null || deepseekPendingRequests.has(cacheKey) || hasRecentAiFailure(cacheKey)) {
+      latestPreloadCacheKey = cacheKey;
       latestPreloadTriggerType = triggerType;
       return;
     }
 
     const preloadDelay = triggerType === 'hover' ? 80 : 0;
 
-    if (latestPreloadPromptKey === promptKey && spotlightPreloadTimer) {
+    if (latestPreloadCacheKey === cacheKey && spotlightPreloadTimer) {
       if (preloadDelay > 0 || latestPreloadTriggerType !== 'hover') {
         return;
       }
@@ -1721,13 +2233,13 @@
       spotlightPreloadTimer = null;
     }
 
-    latestPreloadPromptKey = promptKey;
+    latestPreloadCacheKey = cacheKey;
     latestPreloadTriggerType = triggerType;
 
     const triggerPreloadRequest = () => {
       spotlightPreloadTimer = null;
       latestPreloadTriggerType = '';
-      requestAiRecommendation(promptKey, context.labelText, getAiRecommendationSystemPrompt()).catch(err => {
+      requestAiRecommendation(cacheKey, getAiRecommendationPrompt(context), getAiRecommendationSystemPrompt()).catch(err => {
         console.error('[AutoMock AI] 预加载推荐类目失败:', err);
       });
     };
@@ -1758,9 +2270,12 @@
 
   function getVueInstance(input) {
     if (!input || typeof input.closest !== 'function') return null;
-    const selectors = '.el-autocomplete, .el-select, .el-select-v2, .el-date-editor, .el-cascader, .el-tree-select, .el-radio-group, .el-checkbox-group, .el-switch, .ant-select, .ant-picker, .ant-cascader, .ant-radio-group, .ant-checkbox-group, .ant-switch, .el-input, .el-textarea';
-    // .el-input-number 内部也包着 .el-input，需先取外层实例，才能拿到 min/max/step/precision
-    const wrapper = input.closest('.el-input-number') || input.closest(selectors);
+    // 必须按「专用包装层 → InputNumber → 通用输入」的顺序取：
+    // Select / Cascader / Autocomplete / DatePicker 内部还会渲染一层 .el-input，
+    // 直接 closest('.el-input') 会拿到内层 ElInput，组件钩子与候选上下文全部失效
+    const wrapper = input.closest('.el-input-number')
+      || input.closest(FIELD_COMPONENT_WRAPPER_SELECTORS)
+      || input.closest('.el-input, .el-textarea');
     const directInstance = getVueInstanceFromElement(wrapper) || getVueInstanceFromElement(input);
     if (directInstance) return directInstance;
 
@@ -1809,6 +2324,13 @@
     return 1 + Math.round(((date.getTime() - week1.getTime()) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
   }
 
+  // HTML week 输入要求 YYYY-Www，年份必须按 ISO 周所属年份计算，跨年周不能直接用日历年
+  function getIsoWeekYear(value, week) {
+    if (week === 1 && value.getMonth() === 11) return value.getFullYear() + 1;
+    if (week >= 52 && value.getMonth() === 0) return value.getFullYear() - 1;
+    return value.getFullYear();
+  }
+
   function formatDateValue(value, format) {
     if (!(value instanceof Date) || !format) return value;
     // week 类型默认格式是 yyyywWW：fecha 不认识 W，原样保留后由 formatter 替换周数
@@ -1823,24 +2345,36 @@
         target.setDate(target.getDate() + 3 - (target.getDay() + 6) % 7);
       }
     }
-    const pad = (num) => String(num).padStart(2, '0');
+    const pad = (num, length = 2) => String(num).padStart(length, '0');
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const year = target.getFullYear();
     const month = target.getMonth() + 1;
     const day = target.getDate();
+    const weekday = target.getDay();
     const hours = target.getHours();
     const hours12 = hours % 12 || 12;
-    // 同时覆盖 Element UI 的补零与非补零格式（yyyy-M-d、H:m:s 等）
+    const milliseconds = target.getMilliseconds();
+    const timezoneOffset = target.getTimezoneOffset();
+    // token 语义与 Element 自带的 fecha 分叉对齐（element-ui/lib/utils/date.js）：d/dd=日、D/DD=星期几、S=毫秒、ZZ=时区、Do=序数日。
+    // 注意与 moment / 标准 fecha 相反（那里 D=日），不要“纠正”成标准语义，否则 format 为 'yyyy-MM-dd' 以外的值会与组件显示不一致
+    const ordinalDay = day + (['th', 'st', 'nd', 'rd'][day % 10 > 3 ? 0 : (day - day % 10 !== 10) * day % 10]);
     const tokens = {
       yyyy: String(year),
       YYYY: String(year),
       yy: String(year).slice(-2),
       YY: String(year).slice(-2),
+      MMMM: monthNames[month - 1],
+      MMM: monthNames[month - 1].slice(0, 3),
       MM: pad(month),
       M: String(month),
+      dddd: dayNames[weekday],
+      ddd: dayNames[weekday].slice(0, 3),
       dd: pad(day),
       d: String(day),
-      DD: pad(day),
-      D: String(day),
+      Do: ordinalDay,
+      DD: pad(weekday),
+      D: String(weekday),
       HH: pad(hours),
       H: String(hours),
       hh: pad(hours12),
@@ -1849,10 +2383,14 @@
       m: String(target.getMinutes()),
       ss: pad(target.getSeconds()),
       s: String(target.getSeconds()),
+      SSS: pad(milliseconds, 3),
+      SS: pad(Math.round(milliseconds / 10)),
+      S: String(Math.round(milliseconds / 100)),
       A: hours < 12 ? 'AM' : 'PM',
-      a: hours < 12 ? 'am' : 'pm'
+      a: hours < 12 ? 'am' : 'pm',
+      ZZ: `${timezoneOffset > 0 ? '-' : '+'}${pad(Math.floor(Math.abs(timezoneOffset) / 60) * 100 + Math.abs(timezoneOffset) % 60, 4)}`
     };
-    const formatted = String(format).replace(/yyyy|YYYY|yy|YY|MM|M|dd|d|DD|D|HH|H|hh|h|mm|m|ss|s|A|a/g, token => tokens[token]);
+    const formatted = String(format).replace(/yyyy|YYYY|yy|YY|MMMM|MMM|MM|M|dddd|ddd|dd|d|Do|DD|D|HH|H|hh|h|mm|m|ss|s|SSS|SS|S|ZZ|A|a/g, token => tokens[token]);
     if (week === null) return formatted;
     // 与 Element week formatter 相同：有 WW 时替换为补零周数，否则替换第一个 W
     if (/WW/.test(formatted)) return formatted.replace(/WW/, week < 10 ? `0${week}` : String(week));
@@ -1950,6 +2488,22 @@
     });
   }
 
+  // Element / Ant 的必填星号既可能来自 ::before，也可能被直接写进标签文本；
+  // 末尾的冒号同样是装饰，保留会让标签匹配与 AI prompt 变脏
+  function normalizeLabelText(raw) {
+    return String(raw || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/^[\s*＊:：]+/, '')
+      .replace(/[\s*＊:：]+$/, '');
+  }
+
+  // 相邻单元格/兄弟节点里如果装着另一个控件，读到的就是那个控件的值而不是标签
+  function containsFormControl(el) {
+    if (!el || el.nodeType !== 1 || typeof el.querySelector !== 'function') return false;
+    return Boolean(el.querySelector(FIELD_INPUT_SELECTOR_TEXT));
+  }
+
   function getLabelForInput(input, vueInstance) {
     let labelText = '';
     const formItem = input.closest('.el-form-item');
@@ -1994,7 +2548,7 @@
     }
     if (!labelText) {
       const cell = input.closest('td, th');
-      if (cell && cell.previousElementSibling) {
+      if (cell && cell.previousElementSibling && !containsFormControl(cell.previousElementSibling)) {
         let text = (cell.previousElementSibling.innerText || cell.previousElementSibling.textContent || '').trim();
         if (text && text.length > 0 && text.length < 50) labelText = text;
       }
@@ -2006,8 +2560,10 @@
         let sibling = el.previousElementSibling;
         let siblingCount = 0;
         while (sibling && siblingCount < 3) {
-          let text = (sibling.innerText || sibling.textContent || '').trim();
-          if (text && text.length > 0 && text.length < 50) { labelText = text; break; }
+          if (!containsFormControl(sibling)) {
+            let text = (sibling.innerText || sibling.textContent || '').trim();
+            if (text && text.length > 0 && text.length < 50) { labelText = text; break; }
+          }
           sibling = sibling.previousElementSibling;
           siblingCount++;
         }
@@ -2017,7 +2573,7 @@
     }
     if (!labelText) labelText = input.placeholder || '';
     if (!labelText && input.name) labelText = input.name;
-    return applySiteFieldAlias(labelText.trim());
+    return applySiteFieldAlias(normalizeLabelText(labelText));
   }
 
 
@@ -2055,7 +2611,28 @@
     };
   }
 
-  function buildMockValueFromCommand(cmd, session) {
+  // 时间字段的语义方向：结束类要晚于开始类，没方向就落在中性窗口里
+  function getTemporalHint(labelText) {
+    const text = String(labelText || '');
+    if (/结束|截止|到期|失效|离店|退房|完成时间|有效期至|end|expire/i.test(text)) return 'end';
+    if (/开始|起始|生效|入住|下单|创建时间|申请时间|start/i.test(text)) return 'start';
+    return '';
+  }
+
+  // 数字类字段按标签给量级：库存数量不该是 7291830，单价也不该是整数
+  function buildContextualNumber(labelText, session) {
+    const text = String(labelText || '');
+    const random = getSessionRandom(session);
+    if (/年龄|岁数/.test(text) && session) return getSessionPerson(session).age;
+    if (/数量|库存|件数|人数|次数|天数|台数|重量|面积/.test(text)) return 1 + Math.floor(random() * 200);
+    if (/排序|序号|顺序|层级|优先级/.test(text)) return 1 + Math.floor(random() * 100);
+    if (/评分|分数|得分|星级/.test(text)) return 60 + Math.floor(random() * 41);
+    if (/比例|百分比|折扣|税率/.test(text)) return Number((random() * 100).toFixed(2));
+    if (/金额|价格|费用|单价|总价|余额|工资|薪资|成本/.test(text)) return Number((10 + random() * 4990).toFixed(2));
+    return 1 + Math.floor(random() * 9998);
+  }
+
+  function buildMockValueFromCommand(cmd, session, labelText) {
     let mockValue = '';
     if (cmd.startsWith('__custom_')) {
       const idx = parseInt(cmd.replace('__custom_', ''), 10);
@@ -2065,8 +2642,10 @@
       } else {
         mockValue = generateMockValue('randomString', session);
       }
+    } else if (cmd === 'number') {
+      mockValue = buildContextualNumber(labelText, session);
     } else if (MockFactory[cmd]) {
-      mockValue = generateMockValue(cmd, session);
+      mockValue = generateMockValue(cmd, session, getTemporalHint(labelText));
     } else {
       mockValue = resolveMockType(cmd, session);
     }
@@ -2097,16 +2676,24 @@
 
   // Element 的下拉默认挂在 body 上，inputEl.closest() 找不到；
   // 优先取组件实例关联的 popper，避免页面上同时有多个可见下拉时点错字段的选项
-  function getComponentPopper(vueInstance) {
-    if (!vueInstance) return null;
-    const popperRef = vueInstance.$refs && vueInstance.$refs.popper;
+  function getComponentPopper(vueInstance, inputEl) {
+    if (!vueInstance && !inputEl) return null;
+    const popperRef = vueInstance && vueInstance.$refs && vueInstance.$refs.popper;
     const candidates = [
-      vueInstance.popperElm,
+      vueInstance && vueInstance.popperElm,
       popperRef && (popperRef.$el || popperRef)
     ];
     for (let i = 0; i < candidates.length; i++) {
       const element = candidates[i];
       if (element && element.nodeType === 1) return element;
+    }
+    // rc-select（Ant Design Vue）把浮层 id 暴露在 aria-owns / aria-controls 上，可据此精确定位
+    if (inputEl && typeof inputEl.getAttribute === 'function') {
+      const ownedId = inputEl.getAttribute('aria-owns') || inputEl.getAttribute('aria-controls');
+      if (ownedId) {
+        const owned = document.getElementById(ownedId);
+        if (owned && owned.nodeType === 1) return owned;
+      }
     }
     return null;
   }
@@ -2125,17 +2712,23 @@
   // 这里优先点叶子节点，全是父节点时逐层展开，最多 5 层，兼顾 lazyLoad 场景。
   async function chooseCascaderDomPath(inputEl, session) {
     const vueInstance = getVueInstance(inputEl);
+    const isAntCascader = typeof inputEl.closest === 'function' && Boolean(inputEl.closest('.ant-cascader'));
+    const nodeSelector = isAntCascader ? '.ant-cascader-menu-item' : '.el-cascader-node';
+    const menuSelector = isAntCascader ? '.ant-cascader-menu' : '.el-cascader-menu';
+    const isLeafNode = node => isAntCascader
+      ? !node.classList.contains('ant-cascader-menu-item-expand') && !node.querySelector('.ant-cascader-menu-item-expand-icon')
+      : !node.querySelector('.el-icon-arrow-right');
     for (let depth = 0; depth < 5; depth++) {
-      const popper = getComponentPopper(vueInstance);
+      const popper = getComponentPopper(vueInstance, inputEl);
       const scope = popper || document;
-      const nodes = Array.from(scope.querySelectorAll('.el-cascader-node')).filter(isSafeOptionElement);
+      const nodes = Array.from(scope.querySelectorAll(nodeSelector)).filter(isSafeOptionElement);
       if (!nodes.length) return false;
       // 只看当前展开的最后一列，避免点到前面列里已经选过的节点
-      const menus = Array.from(scope.querySelectorAll('.el-cascader-menu'));
+      const menus = Array.from(scope.querySelectorAll(menuSelector));
       const activeMenu = menus.length ? menus[menus.length - 1] : scope;
       const activeNodes = nodes.filter(node => activeMenu.contains(node));
       const candidates = activeNodes.length ? activeNodes : nodes;
-      const leafNodes = candidates.filter(node => !node.querySelector('.el-icon-arrow-right'));
+      const leafNodes = candidates.filter(isLeafNode);
       if (leafNodes.length) {
         const leaf = pickSessionValue(leafNodes, session);
         leaf.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
@@ -2185,10 +2778,21 @@
     const retryDelay = getBoundedConfigNumber(CONFIG.REMOTE_OPTION_RETRY_DELAY_MS, 250, 50, 2000);
 
     for (let attempt = 0; attempt <= retryCount; attempt++) {
-      if (attempt > 0) await waitForRender(retryDelay);
+      if (attempt > 0) {
+        await waitForRender(retryDelay);
+        // 远程搜索失败后下拉常因失焦关闭；先看浮层是否还开着，关掉了才重新展开并重发查询
+        const currentPopper = getComponentPopper(vueInstance, inputEl);
+        if (!currentPopper || !isElementVisible(currentPopper)) {
+          wrapper.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          wrapper.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          if (typeof inputEl.focus === 'function') inputEl.focus();
+          if (usedCascadeSearch) applyRemoteSearchQuery(inputEl, cascadeSearchValue);
+          await waitForRender(0);
+        }
+      }
       // 级联要一层层点，走专门的逐层展开逻辑，其余下拉只点一次
       if (wrapper.matches('.el-cascader, .ant-cascader')) {
-        const cascaderPopper = getComponentPopper(vueInstance);
+        const cascaderPopper = getComponentPopper(vueInstance, inputEl);
         const cascaderScope = cascaderPopper || document;
         if (cascaderScope.querySelector('.el-cascader-node, .ant-cascader-menu-item')) {
           if (await chooseCascaderDomPath(inputEl, session)) {
@@ -2198,10 +2802,10 @@
         }
         continue;
       }
-      // 先限定到当前组件的 popper；取不到时才回退到全局可见选项
-      const popper = getComponentPopper(vueInstance);
-      let options = popper ? getVisibleChoiceElements(popper) : [];
-      if (!options.length) options = getVisibleChoiceElements();
+      // 找到了当前组件的浮层就只认它：远程搜索加载中浮层会暂时为空，应继续重试；
+      // 此时回退到全局查找会点中页面上其他已展开下拉里的选项。完全定位不到浮层时才全局查找
+      const popper = getComponentPopper(vueInstance, inputEl);
+      const options = getVisibleChoiceElements(popper || undefined);
       if (!options.length) continue;
       const option = pickSessionValue(options, session);
       option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
@@ -2238,9 +2842,19 @@
 
   // 浏览器按 name + 所属表单划分单选组；直接按 document 取同名项，会把弹窗和底层页面的同名单选混为一组
   function getNativeRadioGroup(inputEl) {
+    if (!inputEl) return [];
+    if (inputEl.type !== 'radio' || !inputEl.name) return [inputEl];
     const owner = inputEl.form || null;
-    return Array.from(document.getElementsByName(inputEl.name))
-      .filter(input => input.type === 'radio' && (input.form || null) === owner);
+    if (owner) {
+      return Array.from(document.getElementsByName(inputEl.name))
+        .filter(input => input.type === 'radio' && (input.form || null) === owner);
+    }
+    // 不在 form 内时优先按最近的单选组收敛，其次表单/弹窗，避免多组同名单选互相勾选
+    const scope = (typeof inputEl.closest === 'function'
+      ? inputEl.closest(`.el-radio-group, .ant-radio-group, form, .el-form, .ant-form, ${ACTIVE_DIALOG_SELECTORS.join(', ')}`)
+      : null) || document;
+    return Array.from(scope.querySelectorAll('input[type="radio"]'))
+      .filter(input => input.name === inputEl.name);
   }
 
   function chooseNativeCheck(inputEl, session) {
@@ -2443,6 +3057,10 @@
     const type = String(inputEl.type || '').toLowerCase();
     if (type === 'time') return `${padNumber(date.getHours())}:${padNumber(date.getMinutes())}`;
     if (type === 'month') return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}`;
+    if (type === 'week') {
+      const week = getIsoWeekNumber(date);
+      return `${getIsoWeekYear(date, week)}-W${padNumber(week)}`;
+    }
     if (type === 'datetime-local') return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())}T${padNumber(date.getHours())}:${padNumber(date.getMinutes())}`;
     return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())}`;
   }
@@ -2472,12 +3090,16 @@
     } else if (fieldType === 'number' || fieldType === 'range') {
       const min = Number(inputEl.min);
       const max = Number(inputEl.max);
+      const hasExplicitRange = Number.isFinite(min) || Number.isFinite(max);
       const lower = Number.isFinite(min) ? min : 1;
       const upper = Number.isFinite(max) && max >= lower ? max : Math.max(lower + 100, 100);
       const step = Number(inputEl.step);
+      // 有 min/max 时按控件约束取值；没有约束时按标签给量级（库存 1-200、金额带角分、年龄取人物年龄）
       const amount = CONFIG.NUMBER_FILL_STRATEGY === 'boundary' || getValidationFillMode() === 'boundary'
         ? takeBoundaryValue(session, lower, upper)
-        : lower + getSessionRandom(session)() * (upper - lower);
+        : hasExplicitRange
+          ? lower + getSessionRandom(session)() * (upper - lower)
+          : Math.min(upper, Math.max(lower, buildContextualNumber(labelText, session)));
       const rounded = Number.isFinite(step) && step > 0 ? Math.round((amount - lower) / step) * step + lower : Math.round(amount);
       value = String(Math.min(upper, Math.max(lower, rounded)));
     } else {
@@ -2573,25 +3195,38 @@
       return { status: chooseNativeCheck(inputEl, session) ? 'filled' : 'skipped' };
     }
     if (fieldKind === 'semantic-select' || fieldKind === 'cascader') {
-      if (vueInstance && CustomHooks[componentName] && CustomHooks[componentName](vueInstance, labelText, session)) {
+      // 级联子字段需要先按父级值做远程搜索；此时直接写 v-model 会绕过搜索
+      const cascadeQuery = getCascadeSearchValue(inputEl, labelText, session);
+      if (!cascadeQuery && vueInstance && CustomHooks[componentName] && CustomHooks[componentName](vueInstance, labelText, session)) {
         return { status: 'filled' };
       }
       return { status: await chooseDomOption(inputEl, session, labelText) ? 'filled' : 'skipped' };
     }
-    // 组件根节点没有可写的原生 value，强制命令也必须走钩子，否则只会写到 DOM 属性上
+    // 组件根节点没有可写的原生 value；数值/滑块/日期等受限组件也必须走钩子，
+    // 否则强制类目会写入组件约束之外的值
     const isComponentRoot = !['INPUT', 'TEXTAREA', 'SELECT'].includes(inputEl.tagName) && !inputEl.isContentEditable;
-    if (vueInstance && CustomHooks[componentName] && (!forcedCommand || isComponentRoot)) {
+    if (vueInstance && CustomHooks[componentName] && (isLocalOnlyHookComponent(componentName) || !forcedCommand || isComponentRoot)) {
       return { status: CustomHooks[componentName](vueInstance, labelText, session) ? 'filled' : 'skipped' };
     }
 
-    const value = forcedCommand ? buildMockValueFromCommand(forcedCommand, session) : buildConstrainedMockValue(inputEl, labelText, session);
+    const value = forcedCommand ? buildMockValueFromCommand(forcedCommand, session, labelText) : buildConstrainedMockValue(inputEl, labelText, session);
     if (vueInstance && emitComponentValue(vueInstance, value)) return { status: 'filled' };
     return { status: applyNativeValue(inputEl, value) ? 'filled' : 'skipped' };
   }
 
+  // 点选填充每次点击都新建会话：Spotlight 的核心用法是「点一条、不合适再换」，
+  // 复用同一会话会让 sticky 类目（姓名、手机号、邮箱…）与已记忆的地址/公司反复返回同一个值。
+  // 但固定种子下也不能每次都从种子起点重放，所以第 2 次点击起使用派生种子（见 createMockSession 的 variant）
+  let spotlightFillCount = 0;
+
+  function createSpotlightSession() {
+    spotlightFillCount += 1;
+    return spotlightFillCount === 1 ? createMockSession() : createMockSession(`spotlight-${spotlightFillCount}`);
+  }
+
   function applyDirectCommandToInput(inputEl, cmd) {
     if (!inputEl || !cmd) return false;
-    const session = createMockSession();
+    const session = createSpotlightSession();
     const operation = createFillOperation('spotlight');
     const snapshot = captureFieldSnapshot(inputEl);
     fillField(inputEl, session, cmd)
@@ -2607,7 +3242,7 @@
 
   function applyLocalFallback(context) {
     if (context.hookAction) {
-      const session = createMockSession();
+      const session = createSpotlightSession();
       const operation = createFillOperation('spotlight');
       const snapshot = captureFieldSnapshot(context.inputEl);
       const success = context.hookAction(session);
@@ -2654,25 +3289,35 @@
     return cards.slice(0, 3);
   }
 
-  async function getAiRecommendedCommands(context) {
+  // 返回 { commands, error }：error 非空表示这次 AI 调用失败，Spotlight 据此提示并回退本地规则
+  async function getAiRecommendedCommands(context, options) {
     if (!context || !CONFIG.DEEPSEEK_API_KEY || CONFIG.AI_ENABLE_CLASSIFICATION === false || isLocalOnlyHookComponent(context.componentName)) {
-      return [];
+      return { commands: [], error: '' };
     }
 
-    const promptText = getAiRecommendationPrompt(context);
-    return requestAiRecommendation(promptText, context.labelText, getAiRecommendationSystemPrompt());
+    return requestAiRecommendation(
+      getAiRecommendationCacheKey(context),
+      getAiRecommendationPrompt(context),
+      getAiRecommendationSystemPrompt(),
+      Boolean(options && options.forceRefresh)
+    );
   }
 
-  async function loadSpotlightRecommendations(container, context, requestId) {
+  async function loadSpotlightRecommendations(container, context, requestId, options) {
     if (!container || !context) return;
     const loadingHint = container.querySelector('[data-role="recommend-loading"]');
     if (loadingHint) loadingHint.innerText = '正在为当前字段匹配推荐类目...';
 
-    const aiCommands = await getAiRecommendedCommands(context);
+    const aiResult = await getAiRecommendedCommands(context, options);
     if (requestId !== latestSpotlightRequestId) return;
 
+    const aiCommands = aiResult.commands;
     const recommendCards = buildRecommendationCardsFromCommands(aiCommands, context);
-    renderRecommendationSection(container, recommendCards, !aiCommands.length);
+    // 调用失败要和“AI 确实没有推荐”区分开：前者提示原因并给出重试入口，后者沿用默认文案
+    const failureOptions = aiResult.error
+      ? { hintText: `AI 推荐失败：${aiResult.error}。当前为本地规则推荐，可按 ${getAiShortcutText()} 重试。`, hintError: true }
+      : undefined;
+    renderRecommendationSection(container, recommendCards, !aiCommands.length, failureOptions);
   }
 
   function resolveSpotlightContext() {
@@ -2701,16 +3346,19 @@
     return null;
   }
 
-  function getCachedSpotlightRecommendation(context) {
+  // forceRefresh 用于 Alt+S 手动刷新：即使缓存里是「AI 判定无推荐」的空结果，也再请求一次
+  function getCachedSpotlightRecommendation(context, forceRefresh) {
     if (!context || !CONFIG.DEEPSEEK_API_KEY || CONFIG.AI_ENABLE_CLASSIFICATION === false || isLocalOnlyHookComponent(context.componentName)) {
       return null;
     }
 
-    const promptText = getAiRecommendationPrompt(context);
-    return getCachedAiRecommendationResult(promptText);
+    const cached = getCachedAiRecommendationResult(getAiRecommendationCacheKey(context));
+    if (cached && forceRefresh && cached.length === 0) return null;
+    return cached;
   }
 
-  function renderSpotlightByContext(panel, context) {
+  function renderSpotlightByContext(panel, context, options) {
+    const forceRefresh = Boolean(options && options.forceRefresh);
     latestSpotlightRequestId += 1;
     const requestId = latestSpotlightRequestId;
     if (!panel) return;
@@ -2724,7 +3372,7 @@
       return;
     }
 
-    const cachedAiCommands = getCachedSpotlightRecommendation(context);
+    const cachedAiCommands = getCachedSpotlightRecommendation(context, forceRefresh);
     if (cachedAiCommands) {
       const cachedCards = buildRecommendationCardsFromCommands(cachedAiCommands, context);
       renderRecommendationSection(panel, cachedCards, !cachedAiCommands.length);
@@ -2734,7 +3382,7 @@
     const fallbackCards = buildRecommendationCardsFromCommands([], context);
     renderRecommendationSection(panel, fallbackCards, true);
     if (CONFIG.AI_ENABLE_CLASSIFICATION !== false && CONFIG.DEEPSEEK_API_KEY && !isLocalOnlyHookComponent(context.componentName)) {
-      loadSpotlightRecommendations(panel, context, requestId).catch(err => {
+      loadSpotlightRecommendations(panel, context, requestId, { forceRefresh }).catch(err => {
         console.error('[AutoMock AI] 刷新推荐类目失败:', err);
       });
     }
@@ -2750,18 +3398,55 @@
     return container;
   }
 
+  // 头部的“当前字段”和撤销状态都依赖上下文，渲染推荐区前必须一并刷新，
+  // 否则用 AI 快捷键切换到另一个字段后，标题仍停留在上一个字段
+  function updateSpotlightHeader(panel, context) {
+    if (!panel) return;
+    const fieldLabel = panel.querySelector('[data-role="spotlight-field"]');
+    const undoStatus = panel.querySelector('[data-role="spotlight-undo-status"]');
+    if (fieldLabel) fieldLabel.textContent = context
+      ? `当前字段：${context.labelText || '未命名字段'}`
+      : '请先选中要填充的字段';
+    if (undoStatus) undoStatus.textContent = lastFillOperation && lastFillOperation.snapshots.length
+      ? `可撤销上次填充的 ${lastFillOperation.snapshots.length} 项字段`
+      : '当前没有可撤销的填充操作';
+  }
+
+  function isSpotlightVisible() {
+    const container = document.getElementById('mock-ext-spotlight');
+    return Boolean(container && container.style.display === 'grid');
+  }
+
+  function focusSpotlightEntry(panel) {
+    const closeButton = panel ? panel.querySelector('.mock-spotlight__close') : null;
+    if (closeButton) requestAnimationFrame(() => closeButton.focus({ preventScroll: true }));
+  }
+
   function refreshSpotlightRecommendations() {
+    const wasVisible = isSpotlightVisible();
     const context = resolveSpotlightContext();
     const container = ensureSpotlightVisible();
     const panel = container ? container.querySelector('[data-role="spotlight-panel"]') : null;
-    renderSpotlightByContext(panel, context);
+    updateSpotlightHeader(panel, context);
+    // 手动刷新（Alt+S / 刷新按钮）忽略"AI 无推荐"的空缓存
+    renderSpotlightByContext(panel, context, { forceRefresh: true });
+    if (!wasVisible) focusSpotlightEntry(panel);
   }
 
+  let lastHoverField = null;
+  let lastHoverAt = 0;
   document.addEventListener('pointerover', (e) => {
     if (!e.isTrusted) return;
-    rememberLatestInteraction(e.target);
-    const fieldElement = resolveMockFieldElement(e.target);
-    if (!fieldElement) return;
+    const element = getPotentialFieldTarget(e.target);
+    if (!element) return;
+    const fieldElement = resolveMockFieldElement(element);
+    rememberLatestInteraction(element, fieldElement);
+    if (!fieldElement || !isAiPreloadEnabled()) return;
+    // 指针在同一字段的子节点间移动会连续触发 pointerover，短时间内同一字段只解析一次上下文
+    const now = Date.now();
+    if (fieldElement === lastHoverField && now - lastHoverAt < 300) return;
+    lastHoverField = fieldElement;
+    lastHoverAt = now;
     const context = getFieldContext(fieldElement);
     if (!context) return;
     scheduleAiRecommendationPreload(context, { triggerType: 'hover' });
@@ -2770,9 +3455,11 @@
   ['pointerdown', 'mousedown', 'click', 'focusin'].forEach((eventName) => {
     document.addEventListener(eventName, (e) => {
       if (!e.isTrusted) return;
-      rememberLatestInteraction(e.target);
-      const fieldElement = resolveMockFieldElement(e.target);
-      if (!fieldElement) return;
+      const element = getPotentialFieldTarget(e.target);
+      if (!element) return;
+      const fieldElement = resolveMockFieldElement(element);
+      rememberLatestInteraction(element, fieldElement);
+      if (!fieldElement || !isAiPreloadEnabled()) return;
       const context = getFieldContext(fieldElement);
       if (!context) return;
       scheduleAiRecommendationPreload(context, { triggerType: 'active' });
@@ -2819,6 +3506,10 @@
     const hint = document.createElement('div');
     hint.innerText = options.hintText || (usedFallback ? '当前为本地规则回退推荐。' : `按 ${getAiShortcutText()} 可刷新当前字段的 AI 推荐类目。`);
     hint.className = 'mock-spotlight__hint';
+    if (options.hintError) {
+      hint.classList.add('mock-spotlight__hint--error');
+      hint.setAttribute('role', 'status');
+    }
     section.appendChild(hint);
 
     const loading = panel.querySelector('[data-role="recommend-loading"]');
@@ -2872,6 +3563,7 @@
         #mock-ext-spotlight .mock-spotlight__command--recommended { border-color: #93c5fd; background: #dbeafe; color: #174ea6; }
         #mock-ext-spotlight .mock-spotlight__command--custom { border-color: #fdba74; background: #fff7ed; color: #9a3412; }
         #mock-ext-spotlight .mock-spotlight__hint { margin: 10px 0 0; }
+        #mock-ext-spotlight .mock-spotlight__hint--error { padding: 8px 10px; border-left: 3px solid #c0362c; background: #fdf1f0; color: #8f2118; }
         #mock-ext-spotlight button:focus-visible { outline: 3px solid rgba(37, 99, 201, 0.35); outline-offset: 2px; }
         @media (max-width: 600px) { #mock-ext-spotlight { padding: 10px; } #mock-ext-spotlight .mock-spotlight__panel { width: min(100%, calc(100vw - 20px)); max-height: calc(100dvh - 20px); } #mock-ext-spotlight .mock-spotlight__header { padding: 16px; } #mock-ext-spotlight .mock-spotlight__content { padding: 16px; } #mock-ext-spotlight .mock-spotlight__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
         @media (prefers-reduced-motion: reduce) { #mock-ext-spotlight *, #mock-ext-spotlight *::before, #mock-ext-spotlight *::after { transition-duration: 0.01ms !important; scroll-behavior: auto !important; } }
@@ -2988,8 +3680,34 @@
     closeButton.addEventListener('click', closeSpotlight);
 
     spotlightKeydownHandler = (e) => {
-      if (e.key === 'Escape' && container.style.display === 'grid') {
+      if (container.style.display !== 'grid') return;
+      if (e.key === 'Escape') {
+        // 输入法组合中的 Esc 只用于取消候选词，不作为关闭指令
+        if (e.isComposing) return;
+        // Element 的 PopupManager 在 window 冒泡阶段监听 Esc；不拦截的话，
+        // 关闭 Spotlight 的同时会把下面正在填的弹窗一并关掉
+        e.preventDefault();
+        e.stopPropagation();
         closeSpotlight();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      // aria-modal 对话框需要自己圈住 Tab 焦点，否则会跳进被遮罩盖住的页面控件
+      const focusable = Array.from(container.querySelectorAll('button:not([disabled])'))
+        .filter(element => element.getClientRects().length > 0);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (!container.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
       }
     };
     document.addEventListener('keydown', spotlightKeydownHandler, true);
@@ -3005,23 +3723,16 @@
     const context = resolveSpotlightContext();
     container = ensureSpotlightVisible();
     const panel = container ? container.querySelector('[data-role="spotlight-panel"]') : null;
-    const undoStatus = panel ? panel.querySelector('[data-role="spotlight-undo-status"]') : null;
-    const fieldLabel = panel ? panel.querySelector('[data-role="spotlight-field"]') : null;
-    if (fieldLabel) fieldLabel.textContent = context
-      ? `当前字段：${context.labelText || '未命名字段'}`
-      : '请先选中要填充的字段';
-    if (undoStatus) undoStatus.textContent = lastFillOperation && lastFillOperation.snapshots.length
-      ? `可撤销上次填充的 ${lastFillOperation.snapshots.length} 项字段`
-      : '当前没有可撤销的填充操作';
+    updateSpotlightHeader(panel, context);
     renderSpotlightByContext(panel, context);
-    const closeButton = panel ? panel.querySelector('.mock-spotlight__close') : null;
-    if (closeButton) requestAnimationFrame(() => closeButton.focus({ preventScroll: true }));
+    focusSpotlightEntry(panel);
   }
 
   function closeSpotlight() {
     const container = document.getElementById('mock-ext-spotlight');
     if (container) container.style.display = 'none';
-    if (spotlightTargetElement && typeof spotlightTargetElement.focus === 'function') {
+    // 目标字段可能在填充后随弹窗一起被移除；对游离节点 focus() 会静默失败，焦点落回 body
+    if (spotlightTargetElement && spotlightTargetElement.isConnected && typeof spotlightTargetElement.focus === 'function') {
       spotlightTargetElement.focus();
     }
   }
@@ -3041,12 +3752,6 @@
     applyDirectCommandToInput(context.inputEl, cmd);
   }
 
-  function fillElement(inputEl, mockValue) {
-    const vueInstance = getVueInstance(inputEl);
-    if (emitComponentValue(vueInstance, mockValue)) return true;
-    return applyNativeValue(inputEl, mockValue);
-  }
-
   // 「只填空字段」专用：Slider / Rate 的初始值是 min / 0，读出来是 '0' 但并不代表用户已填，
   // 直接用 getCurrentFieldValue 会让这两类组件永远被跳过。show-input 的 Slider 内层 input 同理
   function hasExistingFieldValue(inputEl) {
@@ -3055,12 +3760,26 @@
       const vueInstance = getVueInstanceFromElement(root);
       const state = readVueFieldValue(vueInstance);
       if (state.exists) {
+        if (state.value === undefined || state.value === null) return false;
         const props = vueInstance.$props || {};
         const floor = root.matches('.el-rate')
           ? 0
           : getComponentNumber(vueInstance.min !== undefined ? vueInstance.min : props.min, 0);
         const values = Array.isArray(state.value) ? state.value : [state.value];
         return values.some(item => Number(item) !== floor);
+      }
+    }
+    // Select / Cascader 的展示文本在多选、远程回显时不可靠，判空要看组件模型
+    const selectLike = typeof inputEl.closest === 'function'
+      ? inputEl.closest('.el-select, .el-select-v2, .el-tree-select, .el-cascader, .ant-select, .ant-cascader')
+      : null;
+    if (selectLike) {
+      const state = readVueFieldValue(getVueInstance(inputEl));
+      if (state.exists) {
+        if (Array.isArray(state.value)) return state.value.length > 0;
+        if (state.value !== undefined && state.value !== null && String(state.value) !== '') return true;
+        // 远程回显等场景下模型可能尚未同步，界面已显示选中项时按展示文本兜底
+        return Boolean(getCurrentFieldValue(inputEl));
       }
     }
     return Boolean(getCurrentFieldValue(inputEl));
@@ -3077,6 +3796,15 @@
     if (inputEl.isContentEditable) return (inputEl.textContent || '').trim();
     if (inputEl.type === 'radio' && inputEl.name) {
       return getNativeRadioGroup(inputEl).some(input => input.checked) ? 'checked' : '';
+    }
+    if (inputEl.type === 'checkbox' && typeof inputEl.closest === 'function') {
+      // 复选组共用一个 v-model，只读第一个 input 会把「已勾选其他项」误判为空
+      const checkboxGroup = inputEl.closest('.el-checkbox-group, .ant-checkbox-group');
+      if (checkboxGroup) {
+        return Array.from(checkboxGroup.querySelectorAll('input[type="checkbox"]')).some(input => input.checked)
+          ? 'checked'
+          : '';
+      }
     }
     if (inputEl.type === 'checkbox' || inputEl.type === 'radio') return inputEl.checked ? 'checked' : '';
     if (inputEl.tagName === 'SELECT' && inputEl.multiple) {
@@ -3111,7 +3839,7 @@
 
       const label = getLabelForInput(inputEl, getVueInstance(inputEl)) || '未命名字段';
       const reasons = new Set();
-      if (isRequiredField(inputEl) && !getCurrentFieldValue(inputEl)) reasons.add('必填项未填写');
+      if (isRequiredField(inputEl) && !hasExistingFieldValue(inputEl)) reasons.add('必填项未填写');
       const nativeReason = getNativeValidityReason(inputEl.validity);
       if (nativeReason) reasons.add(nativeReason);
       if (inputEl.getAttribute('aria-invalid') === 'true') reasons.add('页面标记为无效');
@@ -3130,7 +3858,8 @@
     if (!stack) {
       stack = document.createElement('div');
       stack.id = 'mock-ext-notice-stack';
-      stack.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:10000001;display:flex;flex-direction:column-reverse;align-items:flex-end;gap:8px;pointer-events:none;';
+      // 必须高于 Spotlight(…645) 与设置面板(…646)，否则在这两个浮层打开时提示被遮罩盖住看不到
+      stack.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;display:flex;flex-direction:column-reverse;align-items:flex-end;gap:8px;pointer-events:none;';
       document.body.appendChild(stack);
     }
     return stack;
@@ -3287,6 +4016,12 @@
     try {
       for (let i = 0; i < fields.length; i++) {
         if (i > 0 && i % 5 === 0) await waitForRender(0);
+        // 前面字段的填充可能触发重渲染（条件字段被移除）；已脱离 DOM 的节点既填不进去，也无法生成撤销快照。
+        // 不记入 handled：同一节点若被页面重新挂载，后续扫描仍应能回填
+        if (!fields[i].inputEl.isConnected) {
+          result.skipped++;
+          continue;
+        }
         // 编辑页补全：已有值的字段直接跳过，避免覆盖业务数据；异常值模式本意就是清空/改写，不受影响
         if (CONFIG.FILL_ONLY_EMPTY === true && getValidationFillMode() !== 'invalid' && hasExistingFieldValue(fields[i].inputEl)) {
           session.handledFieldElements.add(fields[i].inputEl);
@@ -3298,6 +4033,8 @@
           const outcome = await fillField(fields[i].inputEl, session);
           if (outcome.status === 'filled') {
             result.filled++;
+            // 组件写 v-model 后展示值要到下一个 tick 才更新，级联搜索需要读到父级最新值
+            if (getVueInstance(fields[i].inputEl)) await waitForRender(0);
             rememberFilledFieldValue(session, fields[i].inputEl);
           } else result.skipped++;
           recordOperationSnapshot(operation, snapshot, outcome);
@@ -3329,7 +4066,8 @@
     } else if (operation === lastFillOperation && operation.snapshots.length) {
       showUndoAction(operation);
     }
-    if (!activeDialogRoot && options.watchNextDialog !== false) {
+    // 一个可填字段都没有时不必再盯着页面等弹窗：省掉 8 秒的 MutationObserver 全量回调开销
+    if (!activeDialogRoot && options.watchNextDialog !== false && result.total > 0) {
       startDeferredDialogFill(session);
     }
     return result;
@@ -3338,18 +4076,38 @@
   // ==========================================
   // 6. 全局原生快捷键挂载 (摆脱浏览器底层限制)
   // ==========================================
+  // macOS 的 Option+字母会产出 ≈、ç 等字符，此时 e.key 已不是字母，才回退到物理键位 e.code；
+  // 常规字母数字不做回退，否则非 QWERTY 布局上两个不同的键会同时命中同一个快捷键
+  function matchesShortcut(event, shortcut) {
+    const expected = String(shortcut || '').toLowerCase();
+    // 输入法组合期间的按键属于输入法，不当作快捷键
+    if (!expected || event.isComposing) return false;
+    const key = String(event.key || '').toLowerCase();
+    if (key === expected) return true;
+    if (/^[a-z0-9]$/.test(key)) return false;
+    const code = String(event.code || '');
+    if (/^[a-z]$/.test(expected)) return code === `Key${expected.toUpperCase()}`;
+    if (/^[0-9]$/.test(expected)) return code === `Digit${expected}`;
+    return false;
+  }
+
   document.addEventListener('keydown', (e) => {
-    if (!e.isTrusted) return;
-    if (e.altKey && e.key.toLowerCase() === CONFIG.SHORTCUT_SPOTLIGHT.toLowerCase()) {
+    if (!e.isTrusted || !e.altKey) return;
+    // 设置面板打开时，快捷键键位输入框会收到 Alt+字母；此时再触发填充/Spotlight 会盖在设置面板上
+    if (document.getElementById('mock-ext-settings')) return;
+    // 长按会连续派发 keydown：照常 preventDefault 以免浏览器菜单被唤出，但重复事件不再执行动作，
+    // 否则 Spotlight 会反复开合、批量填充会在上一轮结束后立刻再覆盖一遍
+    if (matchesShortcut(e, CONFIG.SHORTCUT_SPOTLIGHT)) {
       e.preventDefault();
-      toggleSpotlight();
-    } else if (e.altKey && e.key.toLowerCase() === CONFIG.SHORTCUT_FILL_ALL.toLowerCase()) {
+      if (!e.repeat) toggleSpotlight();
+    } else if (matchesShortcut(e, CONFIG.SHORTCUT_FILL_ALL)) {
       e.preventDefault();
-      fillElementUiForms();
-    } else if (e.altKey && e.key.toLowerCase() === CONFIG.SHORTCUT_AI_TRIGGER.toLowerCase()) {
+      // Spotlight 是 aria-modal：打开期间在遮罩背后批量填充既看不见，也会让面板里的撤销状态过期
+      if (!e.repeat && !isSpotlightVisible()) fillElementUiForms();
+    } else if (matchesShortcut(e, CONFIG.SHORTCUT_AI_TRIGGER)) {
       if (CONFIG.AI_MANUAL_TRIGGER_MODE !== false && CONFIG.AI_ENABLE_CLASSIFICATION !== false) {
         e.preventDefault();
-        refreshSpotlightRecommendations();
+        if (!e.repeat) refreshSpotlightRecommendations();
       }
     }
   }, true);
@@ -3502,6 +4260,7 @@
       </div>
 
       <div style="display: flex; justify-content: flex-end; gap: 12px;">
+        <div id="setting-error" role="alert" hidden></div>
         <button id="setting-cancel" style="padding: 10px 20px; background: #f4f4f5; color: #909399; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all .2s;" onmouseover="this.style.background='#e9e9eb'" onmouseout="this.style.background='#f4f4f5'">取消</button>
         <button id="setting-save" style="padding: 10px 20px; background: #409eff; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all .2s;" onmouseover="this.style.background='#66b1ff'" onmouseout="this.style.background='#409eff'">保存并应用</button>
       </div>
@@ -3554,7 +4313,10 @@
       #mock-ext-settings .mock-settings__button--primary { background: #2563c9; color: #fff; }
       #mock-ext-settings .mock-settings__button--primary:hover { background: #1f54ad; }
       #mock-ext-settings .mock-settings__button:disabled { cursor: not-allowed; opacity: 0.5; }
-      #mock-ext-settings .mock-settings__footer { display: flex; min-width: 0; justify-content: flex-end; gap: 10px; padding: 16px 24px; border-top: 1px solid #e2e8f0; background: #f8fafc; }
+      #mock-ext-settings .mock-settings__footer { display: flex; flex-wrap: wrap; min-width: 0; justify-content: flex-end; gap: 10px; padding: 16px 24px; border-top: 1px solid #e2e8f0; background: #f8fafc; }
+      #mock-ext-settings .mock-settings__error { flex: 1 0 100%; margin: 0; padding: 9px 11px; border-left: 3px solid #c0362c; background: #fdf1f0; color: #8f2118; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+      #mock-ext-settings .mock-settings__error[hidden] { display: none; }
+      #mock-ext-settings .mock-settings__control[aria-invalid="true"] { border-color: #c0362c; }
       @media (max-width: 600px) {
         #mock-ext-settings { padding: 10px !important; }
         #mock-ext-settings .mock-settings__header { padding: 18px 18px 15px; gap: 12px; }
@@ -3643,7 +4405,7 @@
       },
       {
         title: 'AI 推荐',
-        description: '兼容 OpenAI 格式接口。API Key 留空会保留当前值。',
+        description: '兼容 OpenAI 格式接口。启用后会向接口发送：字段名称、组件类型、最多 20 条下拉候选项文本，以及类目清单（含自定义字典的名称与正则，不含字典取值和已填写内容）。API Key 留空会保留当前值。',
         nodes: [
           '#setting-ai-manual-mode',
           '#setting-ai-enable-classification',
@@ -3660,7 +4422,7 @@
       '#setting-spotlight': ['独立控制台', 'Alt + ?'],
       '#setting-fillall': ['一键全量填充', 'Alt + ?'],
       '#setting-ai-trigger': ['AI 推荐类目', 'Alt + ?'],
-      '#setting-ignore': ['一键填充拦截黑名单', '包含这些关键词的字段会被跳过。'],
+      '#setting-ignore': ['一键填充拦截黑名单', '用逗号（中英文均可）或换行分隔；包含这些关键词的字段会被跳过。'],
       '#setting-data-profile': ['业务类型'],
       '#setting-random-seed': ['固定随机种子'],
       '#setting-number-strategy': ['数值策略'],
@@ -3811,9 +4573,35 @@
       apiModel: panel.querySelector('#setting-deepseek-model'),
       apiKey: panel.querySelector('#setting-deepseek-key'),
       clearApiKey: panel.querySelector('#setting-clear-deepseek-key'),
+      error: panel.querySelector('#setting-error'),
       cancel: panel.querySelector('#setting-cancel'),
       save: panel.querySelector('#setting-save')
     };
+
+    // 校验失败直接写在面板里并聚焦出错字段，不再用 alert 阻断；
+    // aria-invalid / aria-describedby 让读屏器把错误关联到具体字段，任何输入都会清除错误提示
+    settings.error.className = 'mock-settings__error';
+    let invalidField = null;
+    const clearSettingsError = () => {
+      settings.error.hidden = true;
+      settings.error.textContent = '';
+      if (invalidField) {
+        invalidField.removeAttribute('aria-invalid');
+        invalidField.removeAttribute('aria-describedby');
+        invalidField = null;
+      }
+    };
+    const showSettingsError = (message, field) => {
+      clearSettingsError();
+      settings.error.textContent = message;
+      settings.error.hidden = false;
+      if (!field) return;
+      invalidField = field;
+      field.setAttribute('aria-invalid', 'true');
+      field.setAttribute('aria-describedby', 'setting-error');
+      field.focus();
+    };
+    panel.addEventListener('input', clearSettingsError);
 
     const previouslyFocusedElement = document.activeElement;
     const getFocusableElements = () => Array.from(panel.querySelectorAll(
@@ -3828,7 +4616,11 @@
     };
     const handleSettingsKeydown = event => {
       if (event.key === 'Escape') {
+        // 输入法组合中的 Esc 只用于取消候选词；此时关闭面板会丢掉尚未保存的 JSON/关键词编辑，交还给输入法处理
+        if (event.isComposing) return;
+        // 与 Spotlight 同理：阻止 Esc 继续冒泡到 Element 的弹窗关闭逻辑
         event.preventDefault();
+        event.stopPropagation();
         closeSettings();
         return;
       }
@@ -3895,7 +4687,7 @@
             const rules = parseSiteRulesText(reader.result);
             settings.siteRules.value = JSON.stringify(rules, null, 2);
           } catch (error) {
-            alert(`站点规则导入失败：${error.message}`);
+            showSettingsError(`站点规则导入失败：${error.message}`, settings.siteRules);
           }
         };
         reader.readAsText(file);
@@ -3913,27 +4705,38 @@
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 0);
       } catch (error) {
-        alert(`站点规则导出失败：${error.message}`);
+        showSettingsError(`站点规则导出失败：${error.message}`, settings.siteRules);
       }
     };
     settings.cancel.onclick = closeSettings;
     settings.save.onclick = () => {
-      const readShortcut = (value, fallback) => String(value || '').trim().toLowerCase() || fallback;
-      const nextSpotlight = readShortcut(settings.shortcutSpotlight.value, 'x');
-      const nextFillAll = readShortcut(settings.shortcutFillAll.value, 'z');
-      const nextAiTrigger = readShortcut(settings.shortcutAiTrigger.value, 's');
-      const shortcutValues = [nextSpotlight, nextFillAll, nextAiTrigger];
-      if (new Set(shortcutValues).size !== shortcutValues.length) {
-        alert('三个快捷键不能重复，请修改后再保存。');
-        return;
+      clearSettingsError();
+      // 留空沿用默认键位；非空必须是单个字符，且三个键位互不相同
+      const shortcutFields = [
+        { field: settings.shortcutSpotlight, key: 'SHORTCUT_SPOTLIGHT', name: '独立控制台' },
+        { field: settings.shortcutFillAll, key: 'SHORTCUT_FILL_ALL', name: '一键全量填充' },
+        { field: settings.shortcutAiTrigger, key: 'SHORTCUT_AI_TRIGGER', name: 'AI 推荐类目' }
+      ];
+      const nextShortcuts = {};
+      const usedShortcuts = new Map();
+      for (const { field, key, name } of shortcutFields) {
+        const rawValue = field.value.trim();
+        const shortcut = rawValue ? normalizeShortcutKey(rawValue, '') : DEFAULT_CONFIG[key];
+        if (!shortcut) {
+          showSettingsError(`「${name}」快捷键必须是单个字符（与 Alt 组合使用）。`, field);
+          return;
+        }
+        if (usedShortcuts.has(shortcut)) {
+          showSettingsError(`「${name}」与「${usedShortcuts.get(shortcut)}」使用了相同的快捷键 Alt+${shortcut.toUpperCase()}，请修改后再保存。`, field);
+          return;
+        }
+        usedShortcuts.set(shortcut, name);
+        nextShortcuts[key] = shortcut;
       }
       // 所有校验通过后再统一写回，避免校验失败时内存配置已被部分修改
-      const nextConfig = { ...CONFIG };
-      nextConfig.SHORTCUT_SPOTLIGHT = nextSpotlight;
-      nextConfig.SHORTCUT_FILL_ALL = nextFillAll;
-      nextConfig.SHORTCUT_AI_TRIGGER = nextAiTrigger;
-      const ignores = settings.ignoreKeywords.value.split(',').map(s => s.trim()).filter(Boolean);
-      nextConfig.IGNORE_KEYWORDS = ignores.length ? ignores : DEFAULT_CONFIG.IGNORE_KEYWORDS;
+      const nextConfig = { ...CONFIG, ...nextShortcuts };
+      // 为空时由 normalizeConfig 落回默认黑名单
+      nextConfig.IGNORE_KEYWORDS = splitKeywordList(settings.ignoreKeywords.value);
       nextConfig.AI_MANUAL_TRIGGER_MODE = settings.aiManualMode.checked;
       nextConfig.AI_ENABLE_CLASSIFICATION = settings.aiClassification.checked;
       nextConfig.AI_ENABLE_PRELOAD = settings.aiPreload.checked;
@@ -3947,11 +4750,12 @@
           parsedDicts.forEach((dict, index) => {
             if (!dict || typeof dict !== 'object') throw new Error(`第 ${index + 1} 项必须是对象`);
             if (typeof dict.regex !== 'string' || !dict.regex.trim()) throw new Error(`第 ${index + 1} 项缺少 regex`);
+            if (isUnsafeUserRegex(dict.regex)) throw new Error(`第 ${index + 1} 项 regex 含嵌套量词或长度过大，可能卡死页面`);
             new RegExp(dict.regex);
             if (!Array.isArray(dict.values) || dict.values.length === 0) throw new Error(`第 ${index + 1} 项 values 必须是非空数组`);
           });
         } catch (e) {
-          alert('自定义字典格式错误：\n' + e.message);
+          showSettingsError('自定义字典格式错误：\n' + e.message, settings.customDicts);
           return;
         }
       }
@@ -3960,7 +4764,7 @@
       try {
         parsedSiteRules = parseSiteRulesText(siteRuleText);
       } catch (error) {
-        alert(`站点规则 JSON 格式错误，请检查！\n${error.message}`);
+        showSettingsError(`站点规则格式错误，请检查：\n${error.message}`, settings.siteRules);
         return;
       }
       nextConfig.CUSTOM_DICTS = parsedDicts;
@@ -3977,7 +4781,12 @@
       nextConfig.REMOTE_OPTION_RETRY_DELAY_MS = getBoundedConfigNumber(settings.optionDelay.value, 250, 50, 2000);
       nextConfig.DYNAMIC_FILL_WINDOW_MS = getBoundedConfigNumber(settings.dynamicWindow.value, 8000, 1000, 60000);
       nextConfig.DYNAMIC_FILL_MAX_DIALOG_STEPS = getBoundedConfigNumber(settings.dialogSteps.value, 3, 1, 10);
-      nextConfig.DEEPSEEK_API_URL = settings.apiUrl.value.trim() || 'https://api.deepseek.com/v1/chat/completions';
+      const nextApiUrl = settings.apiUrl.value.trim() || 'https://api.deepseek.com/v1/chat/completions';
+      if (!isAllowedAiEndpoint(nextApiUrl)) {
+        showSettingsError('AI 接口地址不安全：仅允许 https，或 http 的 localhost / 内网地址。', settings.apiUrl);
+        return;
+      }
+      nextConfig.DEEPSEEK_API_URL = nextApiUrl;
       nextConfig.DEEPSEEK_API_MODEL = settings.apiModel.value.trim() || 'deepseek-v4-flash';
       const nextApiKey = settings.apiKey.value.trim();
       if (settings.clearApiKey.checked) {
@@ -3986,7 +4795,12 @@
         nextConfig.DEEPSEEK_API_KEY = nextApiKey;
       }
 
-      Object.assign(CONFIG, nextConfig);
+      // 统一过一遍归一化再写回，保证内存与存储里的配置形态一致
+      Object.assign(CONFIG, normalizeConfig(nextConfig));
+      // 接口地址、Key、模型、自定义字典任何一项变化，旧推荐与旧失败记录都不再可信
+      clearAiCaches();
+      // 随机种子可能已经变化，点选填充的派生种子需要从头开始
+      spotlightFillCount = 0;
       if (typeof GM_setValue !== 'undefined') {
         GM_setValue('auto_mock_config', CONFIG);
       }
