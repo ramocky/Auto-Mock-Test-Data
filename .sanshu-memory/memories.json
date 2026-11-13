@@ -1,0 +1,12 @@
+{
+  "version": "2.0",
+  "project_path": "D:\\Auto-Mock-Test-Data",
+  "entries": [],
+  "last_dedup_at": "2026-10-20T02:55:13.929782300Z",
+  "config": {
+    "similarity_threshold": 0.7,
+    "dedup_on_startup": true,
+    "enable_dedup": true,
+    "upsert_threshold": 0.55
+  }
+}

@@ -1,0 +1,2 @@
+{"id":"116e314b3d","kind":"decision","text":"`zhi` 在当前 MCP profile 下不可用，按既定回退方案改用 Sanshu CLI 展示收尾确认。","files":["CLAUDE.md","tampermonkey-script/CLAUDE.md","tampermonkey-script/auto-mock.user.js"],"commit":"21cd02e","sessions":78,"date":"2026-10-20","from":"claude 2026-10-20"}
+{"id":"2b768e12c2","kind":"decision","text":"Now updating `checklist.md` with the Round 2 review conclusion and post-review fixes.","files":["project_document/20261105-油猴脚本四轮独立迭代/checklist.md"],"sessions":1,"date":"2026-11-05","from":"claude 2026-11-05"}
